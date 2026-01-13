@@ -1,0 +1,422 @@
+# AI Copilot Instructions for tk-ops-assistant
+
+## Project Overview
+
+**tk-ops-assistant** (TikTok 蓝海运营助手) is a Windows desktop automation tool for TikTok Shop US operations teams. Built with **PyQt5 + Python**, it automates high-potential product discovery ("blue ocean" products) and provides batch video processing for content optimization.
+
+**Key Goal**: Help sellers identify profitable, low-competition products on TikTok Shop and rapidly generate unique video variations for scaling.
+
+## Architecture & Components
+
+### Directory Structure
+```
+tk-ops-assistant/
+├── src/
+│   ├── main.py                 # Application entry point
+│   ├── ui/
+│   │   ├── main_window.py      # Main PyQt5 window & layout
+│   │   ├── blue_ocean.py       # Blue Ocean Detector UI
+│   │   ├── material_factory.py # Video Processing UI
+│   │   └── settings.py         # Settings & IP monitoring
+│   ├── api/
+│   │   ├── tok_api.py          # TikTok API (RapidAPI - TokApi) wrapper
+│   │   ├── ip_detector.py      # IP geolocation check
+│   │   └── 1688_utils.py       # Taobao/1688 link generation
+│   ├── workers/
+│   │   ├── blue_ocean_worker.py    # Threaded product analysis
+│   │   ├── video_worker.py         # Threaded video processing
+│   │   └── base_worker.py          # QThread base class
+│   ├── video/
+│   │   └── processor.py        # ffmpeg-python video editing
+│   └── utils/
+│       ├── logger.py           # Custom logging with Qt signals
+│       ├── excel_export.py     # XLSX export logic
+│       └── config.py           # API keys, thresholds
+├── tests/                      # Unit & integration tests
+├── requirements.txt            # Dependencies
+└── build/                      # PyInstaller build output (.exe)
+```
+
+### Key Components
+
+**1. Blue Ocean Detector (蓝海监测器)**
+- Fetches trending products via RapidAPI TokApi
+- Filters by: sales growth (>500%), review count (<50), price ($20-$80)
+- Estimates profit margin using 1688 image search links
+- Outputs Excel with product metrics + 1688 cross-link lookup URLs
+
+**2. Material Factory (素材工厂)**
+- Batch video processing using ffmpeg-python
+- Applies: horizontal flip, gamma/saturation adjustment, trim head/tail, overlay
+- Outputs MD5-differentiated videos to `/Output/` folder
+- Runs in QThread to prevent UI blocking
+
+**3. IP Environment Monitor (IP 监测)**
+- Background check on startup via ip-api.com (free, 45 req/min limit)
+- Detects geographic region AND datacenter/cloud provider IPs
+- Warns if: location is non-US, or IP belongs to Google/Amazon/Microsoft/Datacenter
+- Shown in status bar with color coding (green = safe, red = risky)
+
+**4. Configuration & API Management**
+- API keys stored in `config.py` (or `.env` for sensitive data)
+- RapidAPI TokApi integration point
+- Threshold settings (growth rate, review count, price range)
+
+### Data Flow
+```
+User Launch
+  ↓
+[IP Monitor] → Check geolocation (background)
+  ↓
+[Main Window] → Display left nav: IP Status, Blue Ocean, Material Factory, Settings
+  ↓
+User Action: Start Blue Ocean Detection
+  ↓
+[Blue Ocean Worker Thread]
+  → API Request to TokApi (fetch Trending/Search results)
+  → Parse JSON: sales, review_count, price, image_url
+  → Apply filters
+  → Generate 1688 image search URLs
+  → Estimate profit (20% 1688 price assumption)
+  ↓
+[UI Signals] → Real-time log output, progress bar, results table
+  ↓
+[Excel Export] → Save to file with timestamp
+  ↓
+User Action: Process Videos
+  ↓
+[Video Worker Thread]
+  → Load video files (batch drag-drop)
+  → Apply transformations (ffmpeg pipeline)
+  → Save to /Output with _processed suffix
+  ↓
+[UI Signals] → Progress, completion status
+```
+
+## Developer Workflows
+
+### Local Development Setup
+```bash
+# 1. Create virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run application (development)
+python src/main.py
+
+# 4. Run tests
+pytest tests/ -v
+
+# 5. Build .exe (PyInstaller)
+pyinstaller src/main.py --onefile --windowed -n tk-ops-assistant --distpath build/
+```
+
+### Key Dependencies
+- **PyQt5** (5.15.9): UI framework (left nav, buttons, tables, log windows)
+- **moviepy** (1.0.3): Video processing (trim, flip, speed, overlay) - simpler than ffmpeg-python
+- **pandas** (2.1.0) + **openpyxl** (3.1.2): Excel (.xlsx) generation with styling
+- **requests** (2.31.0): HTTP calls to RapidAPI and ip-api.com
+- **Pillow** (10.0.0): Image operations for UI and overlay generation
+- **pyinstaller** (6.0.0): Build .exe for distribution
+- **pytest**: Testing framework
+
+### Critical API Configuration
+Before running, configure `src/config.py`:
+```python
+# RapidAPI credentials
+RAPIDAPI_KEY = "your-rapidapi-key"
+RAPIDAPI_HOST = "tiktok-api-host"  # TokApi endpoint
+
+# Thresholds (adjustable in UI)
+GROWTH_RATE_THRESHOLD = 500  # %
+MAX_REVIEWS = 50
+PRICE_MIN, PRICE_MAX = 20, 80
+
+# 1688 Keyword Search Base (NOT image search - more stable)
+TAOBAO_SEARCH_BASE = "https://s.1688.com/selloffer/offer_search.htm?keywords="
+
+# Video Processing
+VIDEO_SPEED_MULTIPLIER = 1.1  # Global speed up (V1.0 only)
+VIDEO_TRIM_HEAD = 0.5  # seconds
+VIDEO_TRIM_TAIL = 0.5  # seconds
+```
+
+### Testing
+```bash
+# Unit tests (individual modules)
+pytest tests/unit/ -v
+
+# Integration tests (API, Excel export)
+pytest tests/integration/ -v
+
+# Coverage
+pytest --cov=src tests/
+```
+
+### Building & Deployment
+```bash
+# Single-file .exe for distribution
+pyinstaller --onefile --windowed --name tk-ops-assistant src/main.py
+
+# Output: build/tk-ops-assistant.exe (no Python runtime required on target machine)
+```
+
+## Project Conventions
+
+### Code Style
+- **Python**: Follow [PEP 8](https://www.python.org/dev/peps/pep-0008/) with [Black](https://github.com/psf/black) formatting
+- **Naming**: Use snake_case for functions/variables, PascalCase for classes
+- **Type hints**: Required for public APIs
+
+### Threading & Signal Architecture (Critical Pattern)
+This project uses **PyQt5's signal/slot mechanism** to decouple UI from blocking operations:
+
+```python
+# src/workers/blue_ocean_worker.py
+from PyQt5.QtCore import QThread, pyqtSignal
+
+class BlueOceanWorker(QThread):
+    # Signals emit data to main UI thread
+    log_signal = pyqtSignal(str)      # Send log messages
+    progress_signal = pyqtSignal(int) # Progress 0-100
+    result_signal = pyqtSignal(list)  # Final product list
+    error_signal = pyqtSignal(str)    # Error messages
+    
+    def run(self):  # Executes in separate thread
+        try:
+            self.log_signal.emit("[START] Fetching TikTok data...")
+            products = self.api_client.fetch_trending()
+            
+            for i, product in enumerate(products):
+                self.progress_signal.emit(int(100 * i / len(products)))
+                self.log_signal.emit(f"Processing: {product['name']}")
+                filtered = self.apply_filters(product)
+                self.result_signal.emit(filtered)
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+# src/ui/blue_ocean.py (Main UI Thread)
+worker = BlueOceanWorker()
+worker.log_signal.connect(self.on_log)       # Append to log window
+worker.progress_signal.connect(self.update_progress_bar)
+worker.result_signal.connect(self.add_to_table)
+worker.start()  # Spawns separate thread, doesn't block UI
+```
+
+**Why**: Keeps UI responsive. Any API calls or video processing MUST run in QThread.
+
+### Excel Export Pattern
+```python
+# src/utils/excel_export.py
+from openpyxl import Workbook
+import urllib.parse
+
+def export_blue_ocean_results(products, filename):
+    wb = Workbook()
+    ws = wb.active
+    headers = [
+        "商品标题", "TK详情页", "1688搜索", "主图", 
+        "7日增长%", "评价数", "价格USD", "预估毛利%", "热门视频"
+    ]
+    ws.append(headers)
+    
+    for product in products:
+        # 1688 keyword search (stable strategy)
+        keywords = urllib.parse.quote(product['title'])
+        taobao_url = f"https://s.1688.com/selloffer/offer_search.htm?keywords={keywords}"
+        
+        ws.append([
+            product['title'],
+            product['tk_url'],
+            taobao_url,  # Keyword search link (not image search)
+            product['main_image_url'],
+            product['growth_rate'],
+            product['review_count'],
+            product['price'],
+            product['profit_margin'],
+            product['top_video_url']
+        ])
+    
+    wb.save(filename)
+```
+
+### API Integration Pattern
+```python
+# src/api/tok_api.py
+class TokApiClient:
+    def __init__(self, api_key, api_host):
+        self.headers = {
+            "X-RapidAPI-Key": api_key,
+            "X-RapidAPI-Host": api_host
+        }
+    
+    def fetch_trending(self, count=100):
+        """Fetch trending products, retry on timeout."""
+        for attempt in range(3):  # Retry 3x
+            try:
+                response = requests.get(
+                    f"https://{self.api_host}/api/trending",
+                    headers=self.headers,
+                    timeout=10
+                )
+                return response.json()['products']
+            except requests.Timeout:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)  # Exponential backoff
+```
+
+### Logging Pattern with IP Detection
+```python
+# src/utils/logger.py
+from PyQt5.QtCore import pyqtSignal, QObject
+import requests
+
+class LogEmitter(QObject):
+    log_signal = pyqtSignal(str)
+
+logger = LogEmitter()
+
+# IP detection on startup (src/api/ip_detector.py)
+def check_ip_safety():
+    response = requests.get("http://ip-api.com/json").json()
+    country = response.get('countryCode')
+    isp = response.get('isp')
+    
+    if country != 'US':
+        return False, f"⚠️ 非美区IP: {country}"
+    elif any(dc in isp for dc in ["Google", "Amazon", "Microsoft", "Datacenter"]):
+        return False, f"⚠️ 检测到机房IP (易限流): {isp}"
+    else:
+        return True, f"✓ 环境安全 ({isp})"
+
+# Usage in workers:
+logger.log_signal.emit("[10:00:01] 正在请求 API 获取榜单数据...")
+logger.log_signal.emit("[10:00:05] *** 命中蓝海！*** 商品B (评价数 10 < 50)")
+```
+
+### File Organization
+- Place utility functions in `src/utils/`
+- Keep test structure mirrored to `src/` structure
+- Worker threads in `src/workers/`, each file = one QThread subclass
+- API clients in `src/api/`, each file = one service
+- Use `__init__.py` for module exports
+
+## Integration Points
+
+### External Dependencies
+- **RapidAPI - TokApi**: TikTok product data (trending, search, shop data)
+- **ip-api.com**: IP geolocation check on startup
+- **ffmpeg CLI**: Video processing backend (must be installed on system)
+- **openpyxl**: Excel generation for export results
+
+### Configuration
+Environment variables in `.env` (create from `.env.example`):
+```
+RAPIDAPI_KEY=your-key-here
+RAPIDAPI_HOST=your-host-here
+IP_CHECK_ENABLED=true
+```
+
+API Configuration in `src/config.py`:
+```python
+# TikTok Shop filtering thresholds
+GROWTH_RATE_THRESHOLD = 500  # %
+MAX_REVIEWS = 50             # Max review count for "blue ocean"
+PRICE_MIN = 20
+PRICE_MAX = 80
+
+# Video processing defaults
+VIDEO_TRIM_HEAD = 0.5        # seconds
+VIDEO_TRIM_TAIL = 0.5        # seconds
+GAMMA_ADJUSTMENT = 1.05
+SATURATION_ADJUSTMENT = 1.1
+```
+
+## Critical Knowledge for Productivity
+
+### Before Making Changes
+1. Check the existing pattern in similar files first
+2. Review `src/` structure to understand module organization
+3. Run tests before committing: `pytest tests/`
+
+### Common Tasks & Where to Find Code
+- **Adding new filter logic**: Edit `src/workers/blue_ocean_worker.py`, add filter condition in `apply_filters()` method
+- **Changing UI layout**: Modify `src/ui/main_window.py` (left nav) or `src/ui/blue_ocean.py`/`material_factory.py`
+- **Adjusting video effects**: Edit `src/video/processor.py`, update ffmpeg command chain
+- **Fixing API issues**: Check `src/api/tok_api.py` retry logic; verify RapidAPI credentials in `src/config.py`
+- **Updating thresholds**: Modify UI inputs in `src/ui/blue_ocean.py`, then pass to worker via `BlueOceanWorker.__init__()`
+- **Modifying Excel export**: Update column headers in `src/utils/excel_export.py`
+
+### Key Architectural Decisions
+- **Why QThread?** API calls and video processing block; QThread + signals keep UI responsive.
+- **Why keyword search (not image search) for 1688?** Image-search URLs are unstable (cross-domain + cookie auth issues). Keyword search is reliable and lets users refine manually if needed.
+- **Why moviepy (not ffmpeg-python)?** Simpler API (no command-line juggling), built-in functions for trim/flip/speed/overlay, less error-prone than subprocess calls.
+- **Why 1.1x uniform speed (not variable speed)?** Variable speed requires audio re-sync which causes desync bugs. 1.1x global speed + trim + filters is sufficient for MD5 differentiation and TikTok's anti-duplication detection.
+- **Why RapidAPI TokApi?** Most complete mobile protocol simulation for TikTok Shop data.
+- **Why double IP check (location + datacenter)?** Non-US IPs get rate-limited; datacenter IPs trigger extra bot detection on TikTok API.
+
+## Video Processing Specifics
+
+### V1.0 Video Processing Strategy
+**Use moviepy library (not ffmpeg-python)**. It's simpler to develop with and handles all transformations intuitively.
+
+### Video Transformation Pipeline (moviepy)
+```python
+# Example from src/video/processor.py
+from moviepy.editor import VideoFileClip, vfx
+
+def process_video(input_path, output_path, trim_head=0.5, trim_tail=0.5, speed=1.1):
+    clip = VideoFileClip(input_path)
+    
+    # 1. Trim head/tail (removes first 0.5s, last 0.5s)
+    duration = clip.duration
+    clip = clip.subclipped(trim_head, duration - trim_tail)
+    
+    # 2. Horizontal flip (mirror)
+    clip = clip.fx(vfx.mirror_x)
+    
+    # 3. Global speed up (V1.0 only supports uniform speed)
+    clip = clip.speedx(speed)  # 1.1x speedup
+    
+    # 4. Optional: Add overlay (bottom banner)
+    # overlay_clip = ImageClip("banner.png").set_duration(clip.duration)
+    # clip = CompositeVideoClip([clip, overlay_clip.set_position((0, clip.h - 50))])
+    
+    # 5. Write output (preserves audio)
+    clip.write_videofile(output_path, verbose=False, logger=None)
+    clip.close()
+```
+
+### Video Processing Workflow (Material Factory)
+1. **User drag-drops videos** into Material Factory UI
+2. **Worker thread processes** each video in sequence
+3. **Apply transformations** in order:
+   - Trim head/tail (remove first 0.5s, last 0.5s)
+   - Horizontal flip (mirror image)
+   - Global speed up (1.1x - to change MD5 and avoid duplication detection)
+   - Optional overlay (bottom banner with logo or text)
+4. **Save to `/Output/`** with `_processed` suffix and timestamp
+5. **UI signals** emit progress after each video completes
+
+### Important Video Notes
+- **V1.0 limitation**: No dynamic variable speed (no cut-fast-cut-slow). Always use uniform 1.1x.
+- **Audio preservation**: moviepy automatically re-encodes audio with video; no manual codec handling needed.
+- **Processing time**: Scales linearly with video duration. Show real-time progress to user.
+- **Output format**: Default MP4 codec (H.264 + AAC) - compatible with TikTok upload requirements.
+
+## Debugging & Troubleshooting
+
+- **Import errors**: Check `src/__init__.py` exports and `sys.path` setup
+- **Missing dependencies**: Run `pip install -r requirements.txt`
+- **API timeouts**: Check `src/api/tok_api.py` retry logic (3x with exponential backoff)
+- **ffmpeg not found**: Ensure ffmpeg is installed and in PATH
+- **UI freezes**: Verify all blocking ops run in QThread, not main thread
+- **Test failures**: Run single test with `-vv` flag for detailed output
+
+## References
+- Main README: See project root for high-level documentation
+- Contributing: See CONTRIBUTING.md for PR guidelines

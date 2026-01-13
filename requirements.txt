@@ -1,0 +1,35 @@
+# GUI Framework
+PyQt5==5.15.9
+
+# 开发工具（Qt Designer 等）请放到 requirements-dev.txt，避免影响打包环境
+
+# Network & API
+requests==2.31.0
+python-dotenv==1.0.0
+
+# Downloader
+yt-dlp
+
+# AI
+openai
+
+# Data Processing & Excel
+pandas==2.1.0
+openpyxl==3.1.2
+
+# Video Processing (V1.0 uses moviepy for simplicity)
+moviepy==1.0.3
+
+# Image Processing
+Pillow==10.0.0
+
+# Packaging
+pyinstaller==6.0.0
+
+# Clipboard monitoring
+pyperclip>=1.8.2
+
+# Testing
+pytest==7.4.0
+
+numpy==1.26.4
