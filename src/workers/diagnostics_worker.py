@@ -149,7 +149,9 @@ class DiagnosticsWorker(BaseWorker):
         package_dir.mkdir(parents=True, exist_ok=True)
         
         # 诊断结果
-        diag_file = package_dir / f"diag_{int(tempfile.gettempdir() or 0)}.json"
+        import time
+
+        diag_file = package_dir / f"diag_{int(time.time())}.json"
         diag_data = {
             'timestamp': __import__('time').strftime('%Y-%m-%d %H:%M:%S'),
             'items': [it.to_dict() for it in items],
@@ -205,6 +207,150 @@ class DiagnosticsWorker(BaseWorker):
                 "网络错误或 API 调用限制，请查看日志详情。"
             )
 
+    def _check_ai_connectivity(self) -> DiagnosticItem:
+        """检查 AI 连通性与基础可用性（用于 AI 文案/二创）。"""
+        api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+        base_url = (getattr(config, "AI_BASE_URL", "") or "").strip()
+        model = (getattr(config, "AI_MODEL", "") or "").strip()
+
+        if not api_key:
+            return DiagnosticItem(
+                "AI 连通性",
+                False,
+                "未配置 AI_API_KEY，无法测试 AI 可用性。",
+                "请在【系统设置 → AI 配置】填写 AI_API_KEY/AI_BASE_URL/AI_MODEL 并保存。",
+            )
+
+        if not base_url:
+            return DiagnosticItem(
+                "AI 连通性",
+                False,
+                "未配置 AI_BASE_URL，无法测试 AI 可用性。",
+                "请在【系统设置 → AI 配置】填写 AI_BASE_URL（DeepSeek/OpenAI 兼容地址）并保存。",
+            )
+
+        if not model:
+            return DiagnosticItem(
+                "AI 连通性",
+                False,
+                "未配置 AI_MODEL，无法测试 AI 可用性。",
+                "请在【系统设置 → AI 配置】选择/填写 AI_MODEL（可在设置页拉取模型列表）。",
+            )
+
+        try:
+            # OpenAI 兼容客户端：DeepSeek/网关同样适用
+            from openai import OpenAI  # type: ignore
+
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            models = client.models.list()
+            count = len(getattr(models, "data", []) or [])
+            return DiagnosticItem(
+                "AI 连通性",
+                True,
+                f"连通正常（models={count}，当前模型：{model}）",
+            )
+        except Exception as e:
+            msg = str(e)
+            # Ark/部分网关不支持 /models：这里不判定为“断网”，由后续“AI 可用性”做最小请求验证
+            if "models" in msg and ("not found" in msg.lower() or "404" in msg or "ResourceNotFound" in msg):
+                return DiagnosticItem(
+                    "AI 连通性",
+                    True,
+                    "服务可能不支持 /models（已跳过 models.list 检查）",
+                    "可在【系统设置】点击‘测试 AI’进行最小请求验证，或直接运行下方‘AI 可用性’诊断项。",
+                )
+            return DiagnosticItem(
+                "AI 连通性",
+                False,
+                f"连通测试异常：{e}",
+                "请检查网络/代理、Base URL 是否正确、Key 是否有效；也可在【系统设置】先点一次‘测试 AI’。",
+            )
+
+    def _check_ai_usability(self) -> DiagnosticItem:
+        """AI 可用性（最小请求）。注意：会消耗极少量 token。"""
+        api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+        base_url = (getattr(config, "AI_BASE_URL", "") or "").strip()
+        model = (getattr(config, "AI_MODEL", "") or "").strip()
+
+        if not (api_key and base_url and model):
+            return DiagnosticItem(
+                "AI 可用性",
+                False,
+                "AI 配置不完整，跳过可用性测试。",
+                "请先配置 AI_API_KEY/AI_BASE_URL/AI_MODEL，然后再运行诊断。",
+            )
+
+        try:
+            from openai import OpenAI  # type: ignore
+
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            # 最小可用性探测：要求输出固定字符（max_tokens 极小）
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是连通性测试助手。"},
+                    {"role": "user", "content": "回复 OK"},
+                ],
+                max_tokens=4,
+                temperature=0,
+            )
+            content = ""
+            try:
+                content = (resp.choices[0].message.content or "").strip()
+            except Exception:
+                content = ""
+            if not content:
+                return DiagnosticItem(
+                    "AI 可用性",
+                    True,
+                    "请求成功（返回内容为空或不可解析）",
+                )
+            return DiagnosticItem(
+                "AI 可用性",
+                True,
+                f"请求成功（返回：{content[:50]}）",
+            )
+        except Exception as e:
+            return DiagnosticItem(
+                "AI 可用性",
+                False,
+                f"可用性测试失败：{e}",
+                "可能是模型名不可用/余额不足/限流/网络问题；可先在设置页刷新模型列表并重试。",
+            )
+
+    def _check_edge_tts_dependency(self) -> DiagnosticItem:
+        try:
+            import edge_tts  # type: ignore
+
+            _ = edge_tts  # noqa: F841
+            return DiagnosticItem("edge-tts", True, "edge-tts 可导入")
+        except Exception as e:
+            return DiagnosticItem(
+                "edge-tts",
+                False,
+                f"edge-tts 不可用：{e}",
+                "如果是源码运行请 pip install -r requirements.txt；如仍失败可先勾选‘配音失败自动降级’保证任务输出。",
+            )
+
+    def _check_volc_tts_config(self) -> DiagnosticItem:
+        provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip().lower()
+        if provider not in ("volcengine", "doubao", "volc"):
+            return DiagnosticItem("火山 TTS 配置", True, "未启用（当前未选择 volcengine）")
+
+        appid = (getattr(config, "VOLC_TTS_APPID", "") or "").strip()
+        token = (config.get_volc_tts_token() or "").strip()
+        voice_type = (getattr(config, "VOLC_TTS_VOICE_TYPE", "") or "").strip()
+
+        if not appid or not token or not voice_type:
+            return DiagnosticItem(
+                "火山 TTS 配置",
+                False,
+                "配置不完整：需要 VOLC_TTS_APPID / VOLC_TTS_ACCESS_TOKEN / VOLC_TTS_VOICE_TYPE",
+                "请到【系统设置 → TTS 配音】填写并保存；也可以先设置备用 TTS 避免任务失败。",
+            )
+
+        return DiagnosticItem("火山 TTS 配置", True, "已配置（appid/token/voice_type）")
+
     def _run_impl(self):
         self.emit_log("开始诊断...")
         self.emit_progress(0)
@@ -237,6 +383,8 @@ class DiagnosticsWorker(BaseWorker):
             )
         )
         items.append(self._check_echotik_connectivity())
+        items.append(self._check_ai_connectivity())
+        items.append(self._check_ai_usability())
         self.emit_progress(25)
 
         # 2) 目录可写性
@@ -248,6 +396,8 @@ class DiagnosticsWorker(BaseWorker):
 
         # 3) 依赖可用性
         items.append(self._check_moviepy())
+        items.append(self._check_edge_tts_dependency())
+        items.append(self._check_volc_tts_config())
         self.emit_progress(75)
 
         # 4) ffmpeg

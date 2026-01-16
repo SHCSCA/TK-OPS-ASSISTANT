@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QDragEnterEvent, QDropEvent
 from workers.video_worker import VideoWorker
 from pathlib import Path
+from datetime import datetime
 import config
 from utils.ui_log import append_log, install_log_context_menu
 
@@ -22,6 +23,7 @@ class MaterialFactoryPanel(QWidget):
         self.worker = None
         self.video_files = []
         self.output_dir = None  # User selected output directory
+        self.output_dir_custom = False
         self._init_ui()
         self.setAcceptDrops(True)
     
@@ -162,11 +164,12 @@ class MaterialFactoryPanel(QWidget):
         left_col.addLayout(row_trim_tail)
 
         # Output Directory Selector
-        lbl_out = QLabel("输出目录 (默认: output/):")
+        default_base = getattr(config, "PROCESSED_VIDEOS_DIR", config.OUTPUT_DIR)
+        lbl_out = QLabel(f"输出目录 (默认: {default_base}):")
         left_col.addWidget(lbl_out)
         
         row_out = QHBoxLayout()
-        self.output_dir_label = QLabel("默认")
+        self.output_dir_label = QLabel(f"默认：{default_base}")
         self.output_dir_label.setStyleSheet("color: #888; font-style: italic;")
         self.output_dir_label.setWordWrap(True) # Allow long paths to wrap or just truncate visually
         row_out.addWidget(self.output_dir_label)
@@ -219,6 +222,7 @@ class MaterialFactoryPanel(QWidget):
         d = QFileDialog.getExistingDirectory(self, "选择保存处理后视频的文件夹")
         if d:
             self.output_dir = d
+            self.output_dir_custom = True
             self.output_dir_label.setText(d)
             self.output_dir_label.setStyleSheet("color: white;")
             append_log(self.log_text, f"输出目录已设置为: {d}")
@@ -276,6 +280,14 @@ class MaterialFactoryPanel(QWidget):
         strip_metadata = self.strip_metadata_checkbox.isChecked()
         parallel_jobs = int(self.parallel_spinbox.value())
         
+        # 未选择输出目录时，使用规范化默认目录（按日期+任务分层）
+        if not self.output_dir or not self.output_dir_custom:
+            self.output_dir = self._build_default_output_dir()
+            self.output_dir_custom = False
+            self.output_dir_label.setText(self.output_dir)
+            self.output_dir_label.setStyleSheet("color: white;")
+            append_log(self.log_text, f"输出目录（默认）: {self.output_dir}")
+
         # Create and start worker
         self.worker = VideoWorker(
             video_files=self.video_files,
@@ -321,6 +333,11 @@ class MaterialFactoryPanel(QWidget):
         self.stop_button.setEnabled(False)
         append_log(self.log_text, "处理完成!", level="INFO")
         self.worker = None
+        if not self.output_dir_custom:
+            default_base = getattr(config, "PROCESSED_VIDEOS_DIR", config.OUTPUT_DIR)
+            self.output_dir = None
+            self.output_dir_label.setText(f"默认：{default_base}")
+            self.output_dir_label.setStyleSheet("color: #888; font-style: italic;")
 
     def shutdown(self):
         """窗口关闭时的资源清理。"""
@@ -329,6 +346,18 @@ class MaterialFactoryPanel(QWidget):
                 self.worker.stop()
         except Exception:
             pass
+
+    def _build_default_output_dir(self) -> str:
+        """生成素材工厂默认输出目录（Output/Processed_Videos/日期/任务）。"""
+        base_dir = Path(getattr(config, "PROCESSED_VIDEOS_DIR", config.OUTPUT_DIR))
+        date_dir = datetime.now().strftime("%Y%m%d")
+        task_dir = datetime.now().strftime("MaterialFactory_%Y%m%d_%H%M%S")
+        target = base_dir / date_dir / task_dir
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return str(target)
     
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter"""

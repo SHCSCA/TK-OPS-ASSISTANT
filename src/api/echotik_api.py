@@ -1,24 +1,24 @@
+"""EchoTik API 客户端封装。
+
+用于访问 EchoTik Open API（https://opendocs.echotik.live）。
 """
-EchoTik API Client
-Wrapper for EchoTik Open API (https://opendocs.echotik.live)
-"""
+
 import requests
 import base64
-import time
 import datetime
 from typing import Dict, List, Optional, Tuple
 import config
 from utils.logger import logger
 
 class EchoTikApiClient:
-    """Wrapper for EchoTik Open API"""
+    """EchoTik Open API 的轻量封装。"""
     
     BASE_URL = "https://open.echotik.live/api/v3"
     
     def __init__(self, api_key: str = None, api_secret: str = None):
-        """
-        Initialize EchoTik client
-        ARGS:
+        """初始化 EchoTik 客户端。
+
+        Args:
             api_key: EchoTik Username
             api_secret: EchoTik Password
         """
@@ -31,7 +31,7 @@ class EchoTikApiClient:
         logger.info(f"EchoTikApiClient Initialized. Key: {key_masked}")
     
     def _generate_auth_header(self) -> str:
-        """Generate Basic Auth header"""
+        """生成 Basic Auth Header。"""
         if not self.api_key or not self.api_secret:
             return ""
         
@@ -40,9 +40,7 @@ class EchoTikApiClient:
         return f"Basic {encoded_credentials}"
     
     def _request(self, method: str, endpoint: str, params: Dict = None) -> Optional[Dict]:
-        """
-        Make HTTP request to EchoTik
-        """
+        """发起 EchoTik HTTP 请求。"""
         url = f"{self.BASE_URL}{endpoint}"
         headers = {
             "Authorization": self._auth_header,
@@ -73,9 +71,7 @@ class EchoTikApiClient:
             return None
 
     def check_connection(self) -> Tuple[bool, str]:
-        """
-        Check API connectivity
-        """
+        """做一次轻量请求用于连通性检测。"""
         if not self.api_key or not self.api_secret:
             return False, "请在设置中配置 EchoTik 账号和密码"
         
@@ -111,9 +107,9 @@ class EchoTikApiClient:
             return False, f"连接异常: {str(e)}"
 
     def fetch_trending_products(self, count: int = 100) -> List[Dict]:
-        """
-        Fetch trending products (Sales Rank List)
-        Tries multiple date strategies if 403/Forbidden occurs (handling time skew).
+        """获取热门商品（销量榜）。
+
+        说明：对时间/年份偏差做简单容错（例如系统时间异常导致 date 无效）。
         """
         endpoint = "/echotik/product/ranklist"
         

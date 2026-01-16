@@ -5,7 +5,6 @@ import threading
 import time
 from typing import Callable, Optional
 import re
-from pathlib import Path
 
 
 class ClipboardMonitor:

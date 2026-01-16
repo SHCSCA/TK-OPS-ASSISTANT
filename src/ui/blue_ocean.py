@@ -196,7 +196,7 @@ class BlueOceanPanel(QWidget):
             return
         
         try:
-            filepath = export_blue_ocean_results(self.results)
+            filepath = export_blue_ocean_results(self.results, emit_log=self._on_log)
             append_log(self.log_text, f"已导出到: {filepath}", level="INFO")
         except Exception as e:
             append_log(self.log_text, f"导出失败: {str(e)}", level="ERROR")

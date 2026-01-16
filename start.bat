@@ -137,12 +137,28 @@ if not exist "%VENV_PY%" (
 )
 
 echo [信息] 正在升级 pip...
+
+REM --- 4.1 修复：部分环境 venv 可能缺失 pip（会导致 No module named pip） ---
+"%VENV_PY%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [警告] 虚拟环境缺失 pip，正在尝试修复（ensurepip）...
+    "%VENV_PY%" -m ensurepip --upgrade
+    if errorlevel 1 (
+        echo [错误] ensurepip 失败，无法修复 pip。
+        echo 请确认安装的 Python 组件完整，或重新运行 start.bat 让脚本重建 venv。
+        if not defined NO_PAUSE pause
+        exit /b 1
+    )
+)
+
 "%VENV_PY%" -m pip install --upgrade pip
 
 echo [信息] 正在安装依赖...
 "%VENV_PY%" -m pip install -r requirements.txt
 if errorlevel 1 (
     echo [错误] 依赖安装失败。
+    echo 可能原因：网络中断/被手动取消/代理问题/权限问题。
+    echo 建议：关闭占用进程后重试，或多运行一次 start.bat 直到安装完成。
     if not defined NO_PAUSE pause
     exit /b 1
 )

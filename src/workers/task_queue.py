@@ -1,9 +1,16 @@
-"""
-统一任务队列框架：支持并发执行、取消、重试、统计导出
+"""统一任务队列（当前：预留/未在主流程接入）
+
+用途设想：
+- 为下载/素材处理/蓝海监测等任务提供统一队列模型
+- 支持并发执行、取消、重试、统计导出
+
+说明：
+- 目前主流程仍以“各面板独立 worker”为主；该模块暂未被引用。
+- 保留此模块是为了后续把多个任务统一编排到一个任务中心。
 """
 from enum import Enum
 from dataclasses import dataclass, asdict, field
-from typing import Callable, Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List
 import uuid
 import time
 from pathlib import Path

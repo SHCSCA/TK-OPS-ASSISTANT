@@ -1,16 +1,16 @@
-"""
-日志工具模块 (Logger Utility)
-集成了 Python 标准 logging 模块与 PyQt5 信号槽机制。
-支持：
-1. 控制台输出 (Console)
-2. 文件日志 (File - 自动轮转)
-3. UI 实时显示 (Qt Signal)
+"""日志模块（文件 + 控制台 + UI 实时输出）
+
+目标：
+- 所有业务代码统一调用标准 logging（或本模块导出的 logger），避免 print
+- 文件日志自动轮转，便于 EXE 环境排障
+- 通过 Qt Signal 把日志实时推送到 UI 日志窗口
+
+注意：
+- 本模块会 import config，请避免在 config import logger（防止循环依赖）。
 """
 import logging
 import sys
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 from PyQt5.QtCore import pyqtSignal, QObject
 import config
 
@@ -51,7 +51,7 @@ class LoggerManager:
         level_name = getattr(config, "LOG_LEVEL", "INFO")
         level = getattr(logging, str(level_name).upper(), logging.INFO)
         root_logger.setLevel(level)
-        root_logger.handlers = [] # 清除旧 handler 防止重复
+        root_logger.handlers = []  # 清除旧 handler，防止重复输出
 
         # 1. 格式化器
         formatter = logging.Formatter(config.LOG_FORMAT, datefmt=config.LOG_DATETIME_FORMAT)

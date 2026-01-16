@@ -92,7 +92,7 @@ class BlueOceanWorker(BaseWorker):
         self.emit_finished(True, "蓝海监测完成")
     
     def _fetch_products(self) -> Optional[List[Dict]]:
-        """Fetch products from API"""
+        """从 EchoTik 拉取候选商品列表。"""
         if self.use_trending:
             self.emit_log("获取商品榜单（周销量榜）...")
             return self.api_client.fetch_trending_products(count=100)
@@ -100,20 +100,24 @@ class BlueOceanWorker(BaseWorker):
             if not self.keyword:
                 self.emit_error("未提供搜索关键字")
                 return None
-            # TODO: Implement search when EchoTik search endpoint is confirmed
+            # TODO：待 EchoTik 的关键字搜索接口确认后再接入；当前先回退到热门榜单。
             self.emit_log("暂未支持关键字搜索，已回退为获取热门榜单...")
             return self.api_client.fetch_trending_products(count=50)
     
     def _apply_filters(self, products: List[Dict]) -> List[Dict]:
         """
-        Apply filtering criteria + Map EchoTik fields to App schema
+        应用过滤条件 + 将 EchoTik 字段映射到本项目内部 schema。
+
+        备注：
+        - EchoTik 字段命名可能随版本变化，建议在这里集中做兼容处理。
         """
         filtered = []
         
         for p in products:
-            # Map EchoTik fields to our schema
-            # EchoTik Schema (from docs):
-            # product_name, total_sale_cnt (growth), spu_avg_price (price), etc.
+            # 字段映射：
+            # - total_sale_cnt：近7日销量/增长指标（本项目用 growth_rate）
+            # - spu_avg_price / max_price：价格
+            # - comment_cnt / review_cnt：评论数
             
             try:
                 growth_rate = int(float(p.get('total_sale_cnt') or 0))

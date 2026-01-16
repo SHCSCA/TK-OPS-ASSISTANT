@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QProgressBar,
+    QSizePolicy,
 )
 
 import config
@@ -51,36 +52,62 @@ class DownloaderPanel(QWidget):
         title.setObjectName("h1")
         layout.addWidget(title)
 
+        tip = QLabel(
+            "用途：输入链接批量下载视频素材（支持剪贴板监听）。\n"
+            "默认下载到【素材库】目录；可在【系统设置 → 下载目录】修改。"
+        )
+        tip.setProperty("variant", "muted")
+        layout.addWidget(tip)
+
         config_frame = QFrame()
         config_frame.setProperty("class", "config-frame")
         config_layout = QHBoxLayout(config_frame)
 
-        config_layout.addWidget(QLabel("下载目录："))
-        self.output_dir_input = QLineEdit(str(config.DOWNLOAD_DIR))
-        config_layout.addWidget(self.output_dir_input)
+        # 左侧：目录信息 + 按钮
+        left_col = QVBoxLayout()
+        left_col.setSpacing(6)
+        left_col.addWidget(QLabel("下载目录："))
 
+        self.output_dir = str(config.DOWNLOAD_DIR)
+        self.output_dir_label = QLabel(self.output_dir)
+        self.output_dir_label.setProperty("variant", "muted")
+        self.output_dir_label.setWordWrap(True)
+        self.output_dir_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.output_dir_label.setToolTip(self.output_dir)
+        left_col.addWidget(self.output_dir_label)
+
+        btn_row = QHBoxLayout()
         browse_btn = QPushButton("选择...")
         browse_btn.clicked.connect(self._choose_dir)
-        config_layout.addWidget(browse_btn)
+        btn_row.addWidget(browse_btn)
 
         open_btn = QPushButton("打开目录")
         open_btn.clicked.connect(self._open_dir)
-        config_layout.addWidget(open_btn)
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch()
+        left_col.addLayout(btn_row)
 
+        config_layout.addLayout(left_col, 2)
+
+        # 右侧：选项
+        right_col = QVBoxLayout()
+        right_col.setSpacing(6)
         self.no_watermark_checkbox = QCheckBox("去水印（尽力获取无水印源）")
         self.no_watermark_checkbox.setChecked(False)
-        config_layout.addWidget(self.no_watermark_checkbox)
+        right_col.addWidget(self.no_watermark_checkbox)
 
         self.clipboard_checkbox = QCheckBox("监听剪贴板（自动识别链接）")
         self.clipboard_checkbox.setChecked(False)
         self.clipboard_checkbox.toggled.connect(self._toggle_clipboard_listener)
-        config_layout.addWidget(self.clipboard_checkbox)
+        right_col.addWidget(self.clipboard_checkbox)
 
         self.archive_checkbox = QCheckBox("自动归档到素材库")
         self.archive_checkbox.setChecked(True)
-        config_layout.addWidget(self.archive_checkbox)
+        right_col.addWidget(self.archive_checkbox)
 
-        config_layout.addStretch()
+        right_col.addStretch()
+        config_layout.addLayout(right_col, 1)
+
         layout.addWidget(config_frame)
 
         layout.addWidget(QLabel("粘贴视频链接（每行 1 条）："))
@@ -123,12 +150,14 @@ class DownloaderPanel(QWidget):
         self.setLayout(layout)
 
     def _choose_dir(self):
-        directory = QFileDialog.getExistingDirectory(self, "选择下载目录", self.output_dir_input.text().strip())
+        directory = QFileDialog.getExistingDirectory(self, "选择下载目录", self.output_dir or str(config.DOWNLOAD_DIR))
         if directory:
-            self.output_dir_input.setText(directory)
+            self.output_dir = directory
+            self.output_dir_label.setText(directory)
+            self.output_dir_label.setToolTip(directory)
 
     def _open_dir(self):
-        path = self.output_dir_input.text().strip()
+        path = (self.output_dir or "").strip() or str(config.DOWNLOAD_DIR)
         if not path:
             return
         try:
@@ -148,7 +177,7 @@ class DownloaderPanel(QWidget):
 
     def start_download(self):
         urls = self._parse_urls()
-        output_dir = self.output_dir_input.text().strip() or str(config.DOWNLOAD_DIR)
+        output_dir = (self.output_dir or "").strip() or str(config.DOWNLOAD_DIR)
         prefer_no_watermark = self.no_watermark_checkbox.isChecked()
         archive_enabled = self.archive_checkbox.isChecked()
 
@@ -162,6 +191,7 @@ class DownloaderPanel(QWidget):
 
         self.log_text.clear()
         self.progress_bar.setValue(0)
+        self._log(f"下载目录：{output_dir}")
 
         self.worker = DownloadWorker(
             urls=urls,

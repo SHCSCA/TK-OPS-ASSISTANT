@@ -1,0 +1,342 @@
+"""
+选品利润清洗池 UI (V2.0 核心模块)
+功能：Excel 导入、实时利润核算、红绿灯视觉反馈、AI 选品参谋入口
+"""
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+                             QTableWidget, QTableWidgetItem, QHeaderView, 
+                             QLabel, QFileDialog, QMenu, QProgressBar, QMessageBox)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent
+import config
+from workers.profit_worker import ExcelParserWorker, ProfitCalculator
+import logging
+import sqlite3
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+class ProfitAnalysisWidget(QWidget):
+    """
+    V2.0 核心模块：选品利润清洗池
+    替代 V1.0 的蓝海监测器
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.current_data = []
+        self.load_profit_params()
+        self.init_ui()
+
+    def load_profit_params(self):
+        """从数据库加载利润核算参数（V2.0: profit_config），失败则回退默认值。"""
+        defaults = {
+            "exchange_rate": 7.25,
+            "shipping_cost_per_kg": 12.0,
+            "platform_commission": 0.05,
+            "fixed_fee": 0.3,
+        }
+
+        self.exchange_rate = float(defaults["exchange_rate"])
+        self.shipping_cost = float(defaults["shipping_cost_per_kg"])
+        self.commission = float(defaults["platform_commission"])
+        self.fixed_fee = float(defaults["fixed_fee"])
+
+        try:
+            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS profit_config (key TEXT PRIMARY KEY, value TEXT)")
+                cur.execute(
+                    "SELECT key, value FROM profit_config WHERE key IN (?, ?, ?, ?)",
+                    (
+                        "exchange_rate",
+                        "shipping_cost_per_kg",
+                        "platform_commission",
+                        "fixed_fee",
+                    ),
+                )
+                rows = cur.fetchall()
+
+            values = {k: v for k, v in rows}
+            self.exchange_rate = float(values.get("exchange_rate", self.exchange_rate))
+            self.shipping_cost = float(values.get("shipping_cost_per_kg", self.shipping_cost))
+            self.commission = float(values.get("platform_commission", self.commission))
+            self.fixed_fee = float(values.get("fixed_fee", self.fixed_fee))
+        except Exception as e:
+            logger.warning(f"利润参数加载失败，已使用默认值: {e}")
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # 1. 标题栏
+        title_label = QLabel("📊 选品利润清洗池")
+        title_label.setObjectName("h1")
+        
+        # 2. 顶部控制栏
+        top_bar = QHBoxLayout()
+        self.lbl_status = QLabel("拖入或点击导入 EchoTik/Kalodata 导出的 Excel 文件")
+        self.lbl_status.setProperty("variant", "muted")
+        
+        btn_import = QPushButton("📥 导入 SaaS 表格")
+        btn_import.setFixedHeight(35)
+        btn_import.setProperty("variant", "primary")
+        btn_import.clicked.connect(self.open_file_dialog)
+        
+        btn_save = QPushButton("💾 保存到数据库")
+        btn_save.setFixedHeight(35)
+        btn_save.clicked.connect(self.save_to_database)
+        
+        top_bar.addWidget(self.lbl_status)
+        top_bar.addStretch()
+        top_bar.addWidget(btn_import)
+        top_bar.addWidget(btn_save)
+        
+        # 3. 参数显示栏
+        param_bar = QHBoxLayout()
+        param_label = QLabel(
+            f"💵 当前参数: 汇率 {self.exchange_rate} | 运费 ${self.shipping_cost}/kg | "
+            f"佣金 {int(self.commission*100)}% + ${self.fixed_fee}"
+        )
+        param_label.setProperty("variant", "muted")
+        param_bar.addWidget(param_label)
+        
+        # 4. 进度条（初始隐藏）
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+
+        # 5. 数据表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            "商品标题", "TK售价($)", "销量", "1688进价(¥)", "重量(kg)", "净利润($)", "ROI(%)", "操作"
+        ])
+        
+        # 列宽设置
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for i in [1, 2, 3, 4, 5, 6]:
+            self.table.setColumnWidth(i, 100)
+        self.table.setColumnWidth(7, 80)
+        
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.DoubleClicked)
+        
+        # 信号连接
+        self.table.cellChanged.connect(self.on_cell_changed)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        # 布局组装
+        layout.addWidget(title_label)
+        layout.addLayout(top_bar)
+        layout.addLayout(param_bar)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.table)
+        
+        # 启用拖拽
+        self.setAcceptDrops(True)
+
+    # --- 拖拽处理 ---
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        for f in files:
+            if f.endswith(('.xlsx', '.csv')):
+                self.start_parsing(f)
+                break
+
+    def open_file_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, '导入选品表', '', 
+            'Excel Files (*.xlsx *.csv);;All Files (*)'
+        )
+        if fname:
+            self.start_parsing(fname)
+
+    def start_parsing(self, file_path):
+        """启动 Worker 线程解析 Excel"""
+        self.lbl_status.setText(f"📂 正在解析: {file_path.split('/')[-1]}...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        self.worker = ExcelParserWorker(file_path)
+        self.worker.progress.connect(self.on_parsing_progress)
+        self.worker.finished.connect(self.on_parsing_finished)
+        self.worker.start()
+
+    def on_parsing_progress(self, percent, msg):
+        self.progress_bar.setValue(percent)
+        self.lbl_status.setText(f"📂 {msg}")
+
+    def on_parsing_finished(self, data, error):
+        self.progress_bar.setVisible(False)
+        
+        if error:
+            self.lbl_status.setText(f"❌ {error}")
+            QMessageBox.warning(self, "解析失败", error)
+            return
+        
+        self.current_data = data
+        self.lbl_status.setText(f"✅ 导入成功: 共 {len(data)} 条数据")
+        self.populate_table()
+
+    def populate_table(self):
+        """填充表格数据"""
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+        
+        for row_idx, item in enumerate(self.current_data):
+            self.table.insertRow(row_idx)
+            
+            # 只读字段
+            self.table.setItem(row_idx, 0, QTableWidgetItem(item['title']))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(f"{item['tk_price']:.2f}"))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(str(item['sales'])))
+            
+            # 可编辑字段
+            self.table.setItem(row_idx, 3, QTableWidgetItem(f"{item['cny_cost']:.2f}"))
+            self.table.setItem(row_idx, 4, QTableWidgetItem(f"{item['weight']:.2f}"))
+            
+            # 计算字段（只读）
+            profit_item = QTableWidgetItem("0.00")
+            profit_item.setFlags(profit_item.flags() ^ Qt.ItemIsEditable)
+            self.table.setItem(row_idx, 5, profit_item)
+            
+            roi_item = QTableWidgetItem("0")
+            roi_item.setFlags(roi_item.flags() ^ Qt.ItemIsEditable)
+            self.table.setItem(row_idx, 6, roi_item)
+
+            # 操作按钮
+            self.table.setItem(row_idx, 7, QTableWidgetItem("🔍"))
+
+            # 初始计算
+            self.calculate_row_profit(row_idx)
+
+        self.table.blockSignals(False)
+
+    def on_cell_changed(self, row, column):
+        """单元格修改时触发重算"""
+        if column in [3, 4]:  # 1688进价 或 重量
+            try:
+                # 更新内存数据
+                if column == 3:
+                    self.current_data[row]['cny_cost'] = float(self.table.item(row, 3).text())
+                elif column == 4:
+                    self.current_data[row]['weight'] = float(self.table.item(row, 4).text())
+                
+                self.calculate_row_profit(row)
+            except ValueError:
+                pass
+
+    def calculate_row_profit(self, row):
+        """计算单行利润并更新 UI"""
+        try:
+            tk_price = float(self.table.item(row, 1).text())
+            cny_cost = float(self.table.item(row, 3).text())
+            weight = float(self.table.item(row, 4).text())
+            
+            net_profit, roi = ProfitCalculator.calculate(
+                tk_price, cny_cost, weight,
+                self.exchange_rate, self.shipping_cost, 
+                self.commission, self.fixed_fee
+            )
+            
+            # 更新数据
+            self.current_data[row]['net_profit'] = net_profit
+            
+            # 更新 UI
+            self.table.item(row, 5).setText(f"{net_profit:.2f}")
+            self.table.item(row, 6).setText(f"{int(roi)}")
+            
+            # 视觉反馈（红绿灯）
+            self.update_row_visuals(row, net_profit)
+            
+        except (ValueError, AttributeError) as e:
+            logger.warning(f"计算利润失败 (行{row}): {e}")
+
+    def update_row_visuals(self, row, profit):
+        """
+        红绿灯视觉系统：
+        🔴 < $5: 红色背景（亏本警告）
+        🟢 > $15: 绿色背景（推荐选品）
+        ⚪ 其他: 默认
+        """
+        if profit < 5:
+            bg_color = QColor("#3a1c1c")  # 暗红
+            text_color = QColor("#ff5252")
+        elif profit > 15:
+            bg_color = QColor("#1c3a24")  # 暗绿
+            text_color = QColor("#00e676")
+        else:
+            bg_color = QColor("#2b2b2b")
+            text_color = QColor("#e0e0e0")
+            
+        for col in range(8):
+            item = self.table.item(row, col)
+            if item:
+                item.setBackground(bg_color)
+                item.setForeground(text_color)
+
+    def show_context_menu(self, pos):
+        """右键菜单"""
+        menu = QMenu()
+        analyze_action = menu.addAction("🤖 AI 选品参谋 (DeepSeek)")
+        search_action = menu.addAction("🔍 1688 图搜")
+        
+        action = menu.exec_(self.table.mapToGlobal(pos))
+        
+        if action == analyze_action:
+            current_row = self.table.currentRow()
+            if current_row >= 0:
+                title = self.table.item(current_row, 0).text()
+                self.analyze_product_ai(title)
+        elif action == search_action:
+            QMessageBox.information(self, "功能开发中", "1688 图搜功能将在后续版本提供")
+
+    def analyze_product_ai(self, title):
+        """调用 AI 参谋（预留接口，Phase 3 实现）"""
+        QMessageBox.information(
+            self, "AI 参谋", 
+            f"正在分析商品：{title}\n\n该功能将在 Phase 3 中集成 DeepSeek API"
+        )
+
+    def save_to_database(self):
+        """保存当前数据到 SQLite"""
+        if not self.current_data:
+            QMessageBox.warning(self, "无数据", "请先导入 Excel 数据")
+            return
+        
+        try:
+            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+
+                saved_count = 0
+                for item in self.current_data:
+                    if item['net_profit'] > 0:  # 只保存有利润数据的行
+                        cursor.execute("""
+                            INSERT INTO product_history 
+                            (title, tk_price, sales_count, cny_cost, weight, net_profit, source_file, image_url)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            item['title'], item['tk_price'], item.get('sales', 0),
+                            item['cny_cost'], item['weight'], item['net_profit'],
+                            'excel_import', item.get('image_url', '')
+                        ))
+                        saved_count += 1
+
+                conn.commit()
+            
+            QMessageBox.information(self, "保存成功", f"已保存 {saved_count} 条有效数据到数据库")
+            logger.info(f"[PROFIT] 保存了 {saved_count} 条选品数据")
+            
+        except Exception as e:
+            logger.error(f"保存数据失败: {e}")
+            QMessageBox.critical(self, "保存失败", str(e))

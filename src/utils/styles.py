@@ -49,30 +49,46 @@ QFrame#TitleBox {
 
 /* =======================================================
    侧边栏导航 (Sidebar)
+   说明：仅作用于主窗口导航，避免污染页面内的 QListWidget。
    ======================================================= */
-QListWidget {
+QListWidget#NavList {
     background-color: #1e1e1e;
     border: none;
     outline: none;
     min-width: 220px;
     padding-top: 20px;
 }
-QListWidget::item {
+QListWidget#NavList::item {
     height: 55px;
     color: #bdc3c7;
     padding-left: 25px;
     border-left: 5px solid transparent;
     margin-bottom: 5px;
 }
-QListWidget::item:selected {
+QListWidget#NavList::item:selected {
     background-color: #333333;
     color: #00e676; /* Tech Green Accent */
     border-left: 5px solid #00e676;
     font-weight: bold;
 }
-QListWidget::item:hover {
+QListWidget#NavList::item:hover {
     background-color: #2c2c2c;
     color: white;
+}
+
+/* 内容区列表（CRM/空投文件列表等） */
+QListWidget#ContentList {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-radius: 10px;
+    outline: none;
+}
+QListWidget#ContentList::item {
+    padding: 10px 12px;
+    border-bottom: 1px solid #3d3d3d;
+}
+QListWidget#ContentList::item:selected {
+    background-color: #2c2c2c;
 }
 
 /* =======================================================
@@ -173,6 +189,37 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
 }
 QTextEdit {
     font-family: "Consolas", "Courier New", monospace;
+}
+
+/* =======================================================
+   标签页 (Tabs)
+   ======================================================= */
+QTabWidget::pane {
+    border: 1px solid #444444;
+    border-radius: 10px;
+    background-color: #2b2b2b;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #1e1e1e;
+    color: #bdc3c7;
+    padding: 10px 14px;
+    border: 1px solid #333333;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 6px;
+    min-width: 110px;
+}
+QTabBar::tab:selected {
+    background-color: #333333;
+    color: #00e676;
+    border-color: #00e676;
+    font-weight: bold;
+}
+QTabBar::tab:hover {
+    color: #ffffff;
+    background-color: #2c2c2c;
 }
 
 /* 常用日志窗口（统一给 QTextEdit 用） */
@@ -396,30 +443,46 @@ QFrame#TitleBox {
 
 /* =======================================================
    侧边栏导航 (Sidebar)
+   说明：仅作用于主窗口导航，避免污染页面内的 QListWidget。
    ======================================================= */
-QListWidget {
+QListWidget#NavList {
     background-color: #ffffff;
     border: none;
     outline: none;
     min-width: 220px;
     padding-top: 20px;
 }
-QListWidget::item {
+QListWidget#NavList::item {
     height: 55px;
     color: #5f6b7a;
     padding-left: 25px;
     border-left: 5px solid transparent;
     margin-bottom: 5px;
 }
-QListWidget::item:selected {
+QListWidget#NavList::item:selected {
     background-color: #eef2f7;
     color: #00b85c;
     border-left: 5px solid #00b85c;
     font-weight: bold;
 }
-QListWidget::item:hover {
+QListWidget#NavList::item:hover {
     background-color: #f0f2f7;
     color: #1f2d3d;
+}
+
+/* 内容区列表（CRM/空投文件列表等） */
+QListWidget#ContentList {
+    background-color: #ffffff;
+    border: 1px solid #d9deea;
+    border-radius: 10px;
+    outline: none;
+}
+QListWidget#ContentList::item {
+    padding: 10px 12px;
+    border-bottom: 1px solid #eef2f7;
+}
+QListWidget#ContentList::item:selected {
+    background-color: #eef2f7;
 }
 
 /* =======================================================
@@ -554,6 +617,37 @@ QTableWidget {
     color: #1f2d3d;
     selection-background-color: #00b85c;
     selection-color: #ffffff;
+}
+
+/* =======================================================
+   标签页 (Tabs)
+   ======================================================= */
+QTabWidget::pane {
+    border: 1px solid #d9deea;
+    border-radius: 10px;
+    background-color: #f6f7fb;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #ffffff;
+    color: #5f6b7a;
+    padding: 10px 14px;
+    border: 1px solid #d9deea;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 6px;
+    min-width: 110px;
+}
+QTabBar::tab:selected {
+    background-color: #eef2f7;
+    color: #00b85c;
+    border-color: #00b85c;
+    font-weight: bold;
+}
+QTabBar::tab:hover {
+    background-color: #f0f2f7;
+    color: #1f2d3d;
 }
 QHeaderView::section {
     background-color: #f0f2f7;

@@ -1,21 +1,31 @@
-"""
-Main application window (Refactored)
+"""主窗口（主导航 + 内容区）
+
+职责：
+- 左侧导航（QListWidget）+ 右侧内容栈（QStackedWidget）
+- 启动时执行数据库迁移
+- 提供 IP 环境监测状态展示
+
+约束：
+- 样式由全局 QSS 控制，本文件避免局部 setStyleSheet 破坏主题一致性。
 """
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QStatusBar,
     QStackedWidget, QFrame
 )
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QIcon, QFont, QColor
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
-from ui.blue_ocean import BlueOceanPanel
+from ui.profit_analysis import ProfitAnalysisWidget  # V2.0 替代蓝海监测
 from ui.material_factory import MaterialFactoryPanel
+from ui.crm import CRMWidget  # V2.0 新增
 from ui.downloader import DownloaderPanel
-from ui.ai_copywriter import AICopywriterPanel
+from ui.ai_content_factory import AIContentFactoryPanel
 from ui.diagnostics import DiagnosticsPanel
 from ui.settings import SettingsPanel
+from ui.lan_airdrop import LanAirdropPanel
+from utils.lan_server import get_lan_server  # V2.0 新增
 
 
 class IPStatusPanel(QWidget):
@@ -80,7 +90,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TikTok 蓝海运营助手 v1.0")
+        self.setWindowTitle("TikTok 运营助手 v2.0 Pro")
         
         # 允许自由拉伸，设定最小尺寸
         self.setMinimumSize(1200, 800)
@@ -89,51 +99,69 @@ class MainWindow(QMainWindow):
         
         # 样式已由 Application 全局应用，此处不再设置
         
+        # V2.0: 执行数据库迁移
+        self._run_migrations()
+        
         self._init_ui()
         self._check_ip_status()
         self.show()
     
+    def _run_migrations(self):
+        """V2.0 启动时执行数据库迁移"""
+        try:
+            from db.migrations import ensure_v2_database
+            ensure_v2_database()
+        except Exception as e:
+            import logging
+            logging.error(f"数据库迁移失败: {e}")
+    
     def _init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
+
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
-        # 1. Left Navigation Panel
+
         left_panel = self._create_left_panel()
         main_layout.addWidget(left_panel)
-        
-        # 2. Right Content Area (QStackedWidget)
+
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.setObjectName("ContentStack")
-        
-        # Initialize Panels
+        main_layout.addWidget(self.stacked_widget, 1)
+
+        central_widget.setLayout(main_layout)
+
+        self._init_content_stack()
+        self._init_status_bar()
+
+        # 默认选中第一个导航项
+        self.nav_list.setCurrentRow(0)
+
+    def _init_content_stack(self) -> None:
+        """初始化右侧内容栈，顺序需与导航同步"""
         self.ip_panel = IPStatusPanel()
-        self.blue_ocean_panel = BlueOceanPanel()
+        self.profit_panel = ProfitAnalysisWidget()  # V2.0 替代蓝海监测
         self.material_factory_panel = MaterialFactoryPanel()
+        self.crm_panel = CRMWidget()  # V2.0 新增
         self.downloader_panel = DownloaderPanel()
-        self.ai_copywriter_panel = AICopywriterPanel()
+        self.ai_content_factory_panel = AIContentFactoryPanel()
+        self.lan_airdrop_panel = LanAirdropPanel()
         self.diagnostics_panel = DiagnosticsPanel()
         self.settings_panel = SettingsPanel()
-        
-        # Add to stack (Order must match nav list)
-        self.stacked_widget.addWidget(self.ip_panel)            # Index 0
-        self.stacked_widget.addWidget(self.blue_ocean_panel)    # Index 1
-        self.stacked_widget.addWidget(self.material_factory_panel) # Index 2
-        self.stacked_widget.addWidget(self.downloader_panel)    # Index 3
-        self.stacked_widget.addWidget(self.ai_copywriter_panel) # Index 4
-        self.stacked_widget.addWidget(self.diagnostics_panel)   # Index 5
-        self.stacked_widget.addWidget(self.settings_panel)      # Index 6
-        
-        main_layout.addWidget(self.stacked_widget)
-        central_widget.setLayout(main_layout)
-        
-        self._init_status_bar()
-        
-        # Select first item by default
-        self.nav_list.setCurrentRow(0)
+
+        for panel in [
+            self.ip_panel,
+            self.profit_panel,
+            self.material_factory_panel,
+            self.crm_panel,
+            self.downloader_panel,
+            self.ai_content_factory_panel,
+            self.lan_airdrop_panel,
+            self.diagnostics_panel,
+            self.settings_panel,
+        ]:
+            self.stacked_widget.addWidget(panel)
 
     def _create_left_panel(self) -> QWidget:
         panel = QFrame()
@@ -154,7 +182,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("h2")
         title_layout.addWidget(title)
         
-        version = QLabel("v1.0 Pro")
+        version = QLabel("v2.0 Pro")
         version.setAlignment(Qt.AlignCenter)
         version.setProperty("variant", "muted")
         title_layout.addWidget(version)
@@ -163,18 +191,21 @@ class MainWindow(QMainWindow):
         
         # Navigation List
         self.nav_list = QListWidget()
-        
+        self.nav_list.setObjectName("NavList")
+
         nav_items = [
-            ("📊  IP 环境监测", 0),
-            ("🌊  蓝海监测器", 1),
-            ("🎬  素材工厂", 2),
-            ("⬇️  素材下载器", 3),
-            ("🤖  AI 文案助手", 4),
-            ("🧪  诊断中心", 5),
-            ("⚙️  系统设置", 6)
+            "🛡  IP 安全体检",
+            "💰  选品清洗池",
+            "🎬  素材工厂",
+            "👥  账号矩阵",
+            "⬇️  素材下载器",
+            "🧠  AI 二创工厂",
+            "📡  局域网空投",
+            "🧪  诊断中心",
+            "⚙️  系统设置",
         ]
-        
-        for name, _ in nav_items:
+
+        for name in nav_items:
             item = QListWidgetItem(name)
             item.setFont(QFont("Microsoft YaHei UI", 10))
             self.nav_list.addItem(item)
@@ -207,6 +238,13 @@ class MainWindow(QMainWindow):
         if index == 0:
             self.ip_panel.refresh_status()
 
+        # 局域网空投：每次进入刷新目录/二维码
+        try:
+            if getattr(self, "lan_airdrop_panel", None) and index == self.stacked_widget.indexOf(self.lan_airdrop_panel):
+                self.lan_airdrop_panel.refresh()
+        except Exception:
+            pass
+
     def _check_ip_status(self):
         is_safe, msg = check_ip_safety()
         self.ip_status_label.setText(f"当前网络: {msg}")
@@ -217,12 +255,20 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close"""
+        # V2.0: 停止局域网服务
+        try:
+            lan_server = get_lan_server()
+            if lan_server.running:
+                lan_server.stop()
+        except:
+            pass
+        
         # 统一清理后台线程/定时器，避免 Windows 退出卡死
         for panel in [
-            getattr(self, "blue_ocean_panel", None),
+            getattr(self, "profit_panel", None),
             getattr(self, "material_factory_panel", None),
+            getattr(self, "crm_panel", None),
             getattr(self, "downloader_panel", None),
-            getattr(self, "ai_copywriter_panel", None),
             getattr(self, "diagnostics_panel", None),
         ]:
             if not panel:

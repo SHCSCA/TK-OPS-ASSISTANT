@@ -235,7 +235,7 @@ class VideoWorker(BaseWorker):
 
         # Export results
         try:
-            export_file = export_video_processing_log(self.processing_results)
+            export_file = export_video_processing_log(self.processing_results, emit_log=self.emit_log)
             self.emit_log(f"已导出结果到：{export_file}")
         except Exception as e:
             self.emit_log(f"导出结果失败：{str(e)}")

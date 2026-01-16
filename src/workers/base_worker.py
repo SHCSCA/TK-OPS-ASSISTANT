@@ -1,11 +1,17 @@
-"""
-Base worker class for QThread operations
-包含基础的线程信号定义和日志记录功能。
+"""QThread Worker 基类
+
+统一约定：
+- 子类优先实现 `_run_impl()`，由基类 `run()` 做异常兜底与结束信号收口
+- 通过 `emit_log/emit_error/emit_progress/emit_finished` 与 UI 通信
+
+兼容性：
+- 保留历史信号 `log_signal/progress_signal/error_signal/finished_signal`
+- 新增 `data_signal/done_signal` 用于更结构化的结果回传
 """
 from PyQt5.QtCore import QThread, pyqtSignal
 import logging
 
-# 获取 dedicated worker logger
+# worker 专用 logger（写文件日志 + 控制台；UI 展示由信号负责）
 worker_logger = logging.getLogger("tk_ops.worker")
 
 

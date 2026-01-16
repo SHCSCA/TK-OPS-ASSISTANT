@@ -48,13 +48,5 @@ def check_ip_safety() -> Tuple[bool, str]:
 
 
 def get_ip_status_color(is_safe: bool) -> str:
-    """
-    Get color code for status display
-    
-    Args:
-        is_safe: Whether IP environment is safe
-        
-    Returns:
-        Color code string for UI
-    """
+    """根据 IP 安全状态返回 UI 颜色标识。"""
     return "green" if is_safe else "red"

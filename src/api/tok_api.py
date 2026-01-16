@@ -1,5 +1,6 @@
-"""
-TikTok API client wrapper for RapidAPI TokApi
+"""TokApi（RapidAPI）客户端封装。
+
+说明：该模块属于可选数据源，用于获取热门/搜索商品等信息。
 """
 import requests
 import time
@@ -9,12 +10,11 @@ from utils.logger import logger
 
 
 class TokApiClient:
-    """Wrapper for RapidAPI TokApi service"""
+    """RapidAPI TokApi 服务封装。"""
     
     def __init__(self, api_key: str | None = None, api_host: str | None = None):
-        """
-        Initialize TokApi client
-        
+        """初始化 TokApi 客户端。
+
         Args:
             api_key: RapidAPI key
             api_host: RapidAPI host endpoint
@@ -35,18 +35,7 @@ class TokApiClient:
         max_retries: int | None = None,
         **kwargs
     ) -> Optional[Dict]:
-        """
-        Make HTTP request with exponential backoff retry
-        
-        Args:
-            method: HTTP method (GET, POST)
-            url: Request URL
-            max_retries: Maximum retry attempts
-            **kwargs: Additional request parameters
-            
-        Returns:
-            Response JSON dict or None if failed
-        """
+        """带指数退避重试的 HTTP 请求封装。"""
         retries = max_retries if max_retries is not None else getattr(config, "API_RETRY_COUNT", 3)
         for attempt in range(retries):
             try:
@@ -98,12 +87,7 @@ class TokApiClient:
         return None
 
     def check_connection(self) -> tuple[bool, str]:
-        """
-        Check API connectivity with a lightweight request
-        
-        Returns:
-            (is_connected, message)
-        """
+        """做一次轻量请求用于连通性检测。"""
         try:
             if not self.api_key or not self.api_host or not self.base_url:
                 return False, "未配置 RapidAPI Key/Host，请先在系统设置中填写并保存。"
@@ -141,16 +125,7 @@ class TokApiClient:
             return False, f"连接发生异常: {str(e)}"
     
     def search_products(self, keyword: str, count: int = 50) -> Optional[List[Dict]]:
-        """
-        Search products by keyword on TikTok Shop
-        
-        Args:
-            keyword: Search keyword
-            count: Number of results
-            
-        Returns:
-            List of product dictionaries or None if failed
-        """
+        """按关键词搜索 TikTok Shop 商品。"""
         url = f"{self.base_url}/api/v1/shop/search"
         params = {"keyword": keyword, "count": count}
         
@@ -166,15 +141,7 @@ class TokApiClient:
             return None
     
     def get_product_details(self, product_id: str) -> Optional[Dict]:
-        """
-        Get detailed information about a specific product
-        
-        Args:
-            product_id: Product ID
-            
-        Returns:
-            Product details dictionary or None if failed
-        """
+        """获取单个商品详情。"""
         url = f"{self.base_url}/api/v1/shop/product/{product_id}"
         
         logger.debug(f"Fetching details for product: {product_id}")

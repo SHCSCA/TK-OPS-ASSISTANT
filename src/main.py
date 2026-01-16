@@ -1,9 +1,12 @@
-"""
-TikTok 蓝海运营助手 - 程序入口 (Main Entry Point)
-负责应用程序的初始化、全局异常捕获和主窗口启动。
+"""程序入口（启动/异常兜底/全局样式）
+
+职责：
+- 解决 PyQt5/sip 在部分环境下的重复加载问题（尤其是 PyInstaller 场景）
+- 初始化日志、同步 .env 并热加载 config
+- 设置全局异常处理器，尽量把崩溃原因落盘并弹窗提示
+- 创建主窗口并进入 Qt 事件循环
 """
 import sys
-import os
 import traceback
 import logging
 
@@ -95,6 +98,13 @@ def main():
     # 初始化日志系统
     LoggerManager.setup_logger()
     logger.info("正在启动 TikTok 蓝海运营助手...")
+
+    # 同步 .env（补齐关键项/迁移旧 key），避免 README/.env.example 与实际配置漂移
+    try:
+        config.sync_env_file()
+        config.reload_config()
+    except Exception:
+        pass
 
     # 启动信息落盘（脱敏）
     try:
