@@ -85,46 +85,44 @@ class AIScriptWorker(BaseWorker):
         except Exception:
             pass
 
-        system = (
-            "You are a TikTok short-form script writer. "
-            "Return STRICT JSON only. Never add markdown. Never add extra keys. "
-            "The script must be suitable for a 30-second voiceover. "
-        )
-        if extra_role:
-            system += "\n[ROLE_PROMPT]\n" + extra_role
-
-        user = (
-            "Write a 30-second product pitch voiceover script for TikTok.\n"
-            "Product description:\n"
-            f"{self.product_desc}\n\n"
-            "OUTPUT FORMAT (STRICT JSON object):\n"
-            "{\n"
-            "  \"hook_text\": \"...\",\n"
-            "  \"pain_text\": \"...\",\n"
-            "  \"solution_text\": \"...\",\n"
-            "  \"cta_text\": \"...\",\n"
-            "  \"full_script\": \"...\"\n"
-            "}\n\n"
-            "Constraints:\n"
-            "- hook_text: ~3 seconds, punchy\n"
-            "- pain_text: ~10 seconds\n"
-            "- solution_text: ~15 seconds\n"
-            "- cta_text: ~2 seconds, must include a clear action (click/buy/shop/link)\n"
-            "- Keep total length under ~110 words (if English)\n"
-            "- No emojis, no hashtags, no title list\n"
-        )
-
         ark_extra = _build_ark_thinking_extra_body()
 
         last_reason = ""
         last_raw = ""
+
+        has_custom_role = bool(self.role_prompt)
+
+        if has_custom_role:
+            system = self.role_prompt
+            system += "\n【必须严格遵守】输出仅脚本文本，不要 JSON，不要 Markdown。"
+            user = f"产品/视频描述：\n{self.product_desc}\n\n请按角色设定生成口播文案："
+            self.emit_log("🧩 已启用自定义角色（自由文本模式），取消强限定结构。")
+        else:
+            system = (
+                "You are a TikTok short-form script writer. "
+                "Follow role/style constraints if provided. "
+                "Output plain text only."
+            )
+            if extra_role:
+                system += "\n[ROLE_PROMPT]\n" + extra_role
+            user = (
+                "Write a 30-second product pitch voiceover script for TikTok.\n"
+                "Product description:\n"
+                f"{self.product_desc}\n\n"
+                "Soft suggestions (not strict):\n"
+                "- Start with a hook\n"
+                "- Mention pain points\n"
+                "- Provide solution\n"
+                "- End with a clear call-to-action\n"
+                "- Output plain text only\n"
+            )
 
         for attempt in range(1, self.max_attempts + 1):
             if self.should_stop():
                 self.emit_finished(False, "任务已取消。")
                 return
 
-            self.emit_progress(int(5 + (attempt - 1) * (70 / max(1, self.max_attempts))))
+            self.emit_progress(int(10 + (attempt - 1) * (70 / max(1, self.max_attempts))))
             self.emit_log(f"🤖 正在生成脚本（第 {attempt}/{self.max_attempts} 次）...")
 
             raw = self._call_ai_json(
@@ -134,6 +132,7 @@ class AIScriptWorker(BaseWorker):
                 system=system,
                 user=user,
                 ark_extra=ark_extra,
+                force_json=False,
             )
 
             last_raw = (raw or "").strip()
@@ -142,21 +141,17 @@ class AIScriptWorker(BaseWorker):
                 self.emit_log(f"⚠️ 脚本为空：{last_reason}")
                 continue
 
-            payload = _try_parse_json(last_raw)
-            if payload is None:
-                last_reason = "模型输出不是合法 JSON。"
-                self.emit_log(f"⚠️ {last_reason}（将自动重试）")
-                continue
-
-            result = validate_tiktok_script_payload(payload, strict=self.strict_validation)
-            if result.ok and result.script_json:
-                self.emit_progress(95)
-                self.data_signal.emit(result.script_json)
-                self.emit_finished(True, "脚本生成并校验通过。")
-                return
-
-            last_reason = (result.reason or "脚本校验失败。").strip()
-            self.emit_log(f"⚠️ {last_reason}（将自动重试）")
+            result_data = {
+                "full_script": last_raw,
+                "hook_text": "",
+                "pain_text": "",
+                "solution_text": "",
+                "cta_text": "",
+            }
+            self.emit_progress(100)
+            self.data_signal.emit(result_data)
+            self.emit_finished(True, "脚本生成成功（自由文本模式）。")
+            return
 
         # 全部失败：回传最后一次原文，便于 UI 展示/诊断
         if last_raw:
@@ -173,76 +168,53 @@ class AIScriptWorker(BaseWorker):
         system: str,
         user: str,
         ark_extra: dict[str, Any] | None,
+        force_json: bool = True
     ) -> str:
         try:
             import openai
 
             client = openai.OpenAI(api_key=api_key, base_url=base_url)
+            
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
+            
+            # 基础参数
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.5, # 稍微提高一点创造力
+                "max_tokens": 1000, # 增加长度以防截断
+            }
+            if force_json:
+                kwargs["response_format"] = {"type": "json_object"}
+            if ark_extra:
+                kwargs["extra_body"] = ark_extra
 
-            # 优先：支持 JSON response_format 的 SDK/后端
+            resp = None
             try:
-                if ark_extra:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        temperature=0.4,
-                        max_tokens=450,
-                        response_format={"type": "json_object"},
-                        extra_body=ark_extra,
-                    )
-                else:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        temperature=0.4,
-                        max_tokens=450,
-                        response_format={"type": "json_object"},
-                    )
-                return (resp.choices[0].message.content or "").strip()
+                # 尝试标准调用
+                resp = client.chat.completions.create(**kwargs)
             except TypeError:
-                # openai SDK 版本不支持 response_format/extra_body
+                # 降级：如果包含不支持的 extra_body/response_format
+                if "response_format" in kwargs:
+                    del kwargs["response_format"]
+                if "extra_body" in kwargs:
+                    del kwargs["extra_body"]
+                resp = client.chat.completions.create(**kwargs)
+            
+            # === 增强日志：记录 Token 消耗 ===
+            try:
+                if resp and resp.usage:
+                    u = resp.usage
+                    p = getattr(u, "prompt_tokens", 0)
+                    c = getattr(u, "completion_tokens", 0)
+                    t = getattr(u, "total_tokens", 0)
+                    self.emit_log(f"💰 Token 消耗: Prompt={p}, Completion={c}, Total={t}")
+            except Exception:
                 pass
-
-            # 兜底：普通 chat.completions
-            try:
-                if ark_extra:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        temperature=0.4,
-                        max_tokens=450,
-                        extra_body=ark_extra,
-                    )
-                else:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        temperature=0.4,
-                        max_tokens=450,
-                    )
-            except TypeError:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    temperature=0.4,
-                    max_tokens=450,
-                )
-
+            
             return (resp.choices[0].message.content or "").strip()
 
         except Exception as e:

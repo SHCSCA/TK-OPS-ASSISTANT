@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer
@@ -49,6 +50,7 @@ class AIContentFactoryPanel(QWidget):
         self.script_worker: AIScriptWorker | None = None
         self._approved_script_text: str = ""
         self._approved_script_json: dict | None = None
+        self._token_usage = {"prompt": 0, "completion": 0, "total": 0}
 
         # 自定义角色提示词：轻量防抖，避免频繁写 .env
         self._role_save_timer = QTimer(self)
@@ -198,6 +200,10 @@ class AIContentFactoryPanel(QWidget):
         self.script_status_label.setProperty("variant", "muted")
         step1_form.addWidget(self.script_status_label)
 
+        self.script_token_label = QLabel("Token 消耗：P=输入 / C=输出 / T=合计 | 费用估算：未配置")
+        self.script_token_label.setProperty("variant", "muted")
+        step1_form.addWidget(self.script_token_label)
+
         self.script_preview = QTextEdit()
         self.script_preview.setPlaceholderText("脚本将显示在这里（通过校验后，点击‘通过并进入下一步’）")
         self.script_preview.setMinimumHeight(380)
@@ -206,6 +212,12 @@ class AIContentFactoryPanel(QWidget):
         except Exception:
             pass
         step1_form.addWidget(self.script_preview)
+
+        # Token 成本显示（按钮行上方）
+        self.script_token_summary = QLabel("本次 Token 消耗：P(输入)=0 / C(输出)=0 / T(合计)=0 | 费用：未配置")
+        self.script_token_summary.setProperty("variant", "muted")
+        self.script_token_summary.setStyleSheet("QLabel { font-weight: bold; }")
+        step1_form.addWidget(self.script_token_summary)
 
         script_btn_row = QHBoxLayout()
         self.gen_script_btn = QPushButton("生成脚本")
@@ -419,6 +431,10 @@ class AIContentFactoryPanel(QWidget):
         log_title.setObjectName("h2")
         log_form.addWidget(log_title)
 
+        self.token_cost_label = QLabel("Token 消耗：P=输入 / C=输出 / T=合计 | 费用估算：未配置")
+        self.token_cost_label.setProperty("variant", "muted")
+        log_form.addWidget(self.token_cost_label)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("LogView")
@@ -472,6 +488,71 @@ class AIContentFactoryPanel(QWidget):
 
     def _append(self, text: str, level: str = "INFO") -> None:
         append_log(self.log_view, text, level=level)
+        try:
+            self._maybe_update_token_usage(text)
+        except Exception:
+            pass
+
+    def _reset_token_usage(self) -> None:
+        self._token_usage = {"prompt": 0, "completion": 0, "total": 0}
+        try:
+            self.token_cost_label.setText("Token 消耗：P=输入 / C=输出 / T=合计 | 费用估算：未配置")
+        except Exception:
+            pass
+        try:
+            self.script_token_label.setText("Token 消耗：P=输入 / C=输出 / T=合计 | 费用估算：未配置")
+        except Exception:
+            pass
+        try:
+            self.script_token_summary.setText("本次 Token 消耗：P(输入)=0 / C(输出)=0 / T(合计)=0 | 费用：未配置")
+        except Exception:
+            pass
+
+    def _maybe_update_token_usage(self, text: str) -> None:
+        if not text:
+            return
+        m = re.search(r"Token\s*消耗[:：]\s*Prompt=(\d+),\s*Completion=(\d+),\s*Total=(\d+)", text)
+        if m:
+            p = int(m.group(1))
+            c = int(m.group(2))
+            t = int(m.group(3))
+        else:
+            m2 = re.search(r"Token\s*Usage[:：]\s*P=(\d+),\s*C=(\d+),\s*T=(\d+)", text)
+            if not m2:
+                return
+            p = int(m2.group(1))
+            c = int(m2.group(2))
+            t = int(m2.group(3))
+
+        self._token_usage["prompt"] += p
+        self._token_usage["completion"] += c
+        self._token_usage["total"] += t
+
+        price_p = float(getattr(config, "AI_TOKEN_PRICE_PER_1K_PROMPT", 0.0) or 0.0)
+        price_c = float(getattr(config, "AI_TOKEN_PRICE_PER_1K_COMPLETION", 0.0) or 0.0)
+        currency = (getattr(config, "AI_TOKEN_CURRENCY", "USD") or "USD").strip().upper()
+
+        if price_p > 0 or price_c > 0:
+            cost = (self._token_usage["prompt"] / 1000.0) * price_p + (self._token_usage["completion"] / 1000.0) * price_c
+            cost_text = f"{currency} {cost:.4f}"
+        else:
+            cost_text = "未配置"
+
+        self.token_cost_label.setText(
+            f"Token 消耗：P(输入)={self._token_usage['prompt']} / C(输出)={self._token_usage['completion']} / T(合计)={self._token_usage['total']} | 费用估算：{cost_text}"
+        )
+        try:
+            self.script_token_label.setText(
+                f"Token 消耗：P(输入)={self._token_usage['prompt']} / C(输出)={self._token_usage['completion']} / T(合计)={self._token_usage['total']} | 费用估算：{cost_text}"
+            )
+        except Exception:
+            pass
+        try:
+            self.script_token_summary.setText(
+                f"本次 Token 消耗：P(输入)={self._token_usage['prompt']} / C(输出)={self._token_usage['completion']} / T(合计)={self._token_usage['total']} | 费用：{cost_text}"
+            )
+        except Exception:
+            pass
 
     def _schedule_persist_custom_role_prompt(self) -> None:
         try:
@@ -672,6 +753,7 @@ class AIContentFactoryPanel(QWidget):
             return
 
         self.log_view.clear()
+        self._reset_token_usage()
         self._append("开始执行 Step 2：语音合成 + 混音...")
 
         # 切到日志页，方便查看进度
@@ -710,6 +792,8 @@ class AIContentFactoryPanel(QWidget):
 
         # 切到脚本页，方便查看输出
         self._switch_to_tab("script")
+
+        self._reset_token_usage()
 
         # 清理旧状态
         self._approved_script_text = ""

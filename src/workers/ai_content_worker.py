@@ -185,17 +185,30 @@ class AIContentWorker(QThread):
             
             system = (
                 "You are a TikTok script writer. Keep output concise and natural. "
-                "Follow role/style constraints if provided, but do not change the output format requirements."
+                "Follow role/style constraints if provided."
             )
             extra_role = (
                 (self.role_prompt or "").strip()
                 or (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
                 or (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
             )
+            
+            is_free_mode = bool(self.role_prompt and self.role_prompt.strip())
+            
             if extra_role:
                 system = system + "\n[ROLE_PROMPT]\n" + extra_role
 
-            prompt = f"""
+            if is_free_mode:
+                # 自由模式：完全听从 Role Prompt，仅保留最基础要求
+                prompt = f"""
+Context / Product: {self.product_desc}
+
+Requirement: Write a short video script based on the ROLE_PROMPT above.
+Output ONLY the script text, no markdown.
+""".strip()
+            else:
+                # 默认模式：保持旧有结构
+                prompt = f"""
 Create a 30-second product pitch script for:
 
 Product: {self.product_desc}
@@ -226,6 +239,7 @@ Output ONLY the script text, no formatting.
                 text = ""
                 try:
                     text = (getattr(resp, "output_text", "") or "").strip()
+                    # 尝试获取 usage (responses API 可能结构不同，需查阅文档，这里暂忽略或尝试通用字段)
                 except Exception:
                     text = ""
                 if text:
@@ -235,43 +249,46 @@ Output ONLY the script text, no formatting.
 
             # chat.completions：如为 Ark 且配置了 thinking，则尝试透传；不支持则自动降级。
             try:
-                if ark_extra:
-                    response = client.chat.completions.create(
-                        model=use_model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": prompt},
-                        ],
-                        max_tokens=200,
-                        temperature=0.7,
-                        extra_body=ark_extra,
-                    )
-                else:
-                    response = client.chat.completions.create(
-                        model=use_model,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": prompt},
-                        ],
-                        max_tokens=200,
-                        temperature=0.7,
-                    )
-            except TypeError:
-                # openai SDK 不支持 extra_body
-                response = client.chat.completions.create(
-                    model=use_model,
-                    messages=[
+                kwargs = {
+                    "model": use_model,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=200,
-                    temperature=0.7,
-                )
+                    "max_tokens": 1000,
+                    "temperature": 0.5,
+                }
+                if ark_extra:
+                    kwargs["extra_body"] = ark_extra
+                    
+                response = client.chat.completions.create(**kwargs)
+                
+                # Token 统计
+                try:
+                    if response and response.usage:
+                        u = response.usage
+                        token_msg = f"💰 Token 消耗: Prompt={u.prompt_tokens}, Completion={u.completion_tokens}, Total={u.total_tokens}"
+                        logger.info(token_msg)
+                        # 通过 progress 信号传回 UI 日志 (保持进度条不动)
+                        self.progress.emit(15, token_msg)
+                except Exception:
+                    pass
+                    
+                return (response.choices[0].message.content or "").strip()
+            except TypeError:
+                 # Legacy fallback
+                 try:
+                    # 降级尝试：不带 extra_body
+                    if "extra_body" in kwargs:
+                        del kwargs["extra_body"]
+                    response = client.chat.completions.create(**kwargs)
+                    return (response.choices[0].message.content or "").strip()
+                 except Exception:
+                     pass
 
-            script = response.choices[0].message.content.strip()
-            logger.info(f"[AI_COST] 生成脚本消耗 Token: {response.usage.total_tokens}")
-            return script
-            
+            except Exception as e:
+                logger.error(f"Generate script error: {e}")
+                return ""
         except Exception as e:
             logger.error(f"脚本生成调用失败: {e}", exc_info=True)
             self._last_script_error = str(e)

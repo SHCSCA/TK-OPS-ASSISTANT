@@ -139,6 +139,7 @@ AI_FACTORY_ROLE_PROMPT = _clean_env_value(os.getenv("AI_FACTORY_ROLE_PROMPT", ""
 AI_OUTPUT_LANG = _clean_env_value(os.getenv("AI_OUTPUT_LANG", "en")) or "en"
 
 
+
 # ===================================================
 # TTS 配音配置（AI 二创工厂）
 # ===================================================
@@ -164,16 +165,33 @@ VOLC_TTS_ENCODING = _clean_env_value(os.getenv("VOLC_TTS_ENCODING", "mp3")) or "
 # ===================================================
 def _env_int(name: str, default: int) -> int:
 	try:
-		return int(float(_clean_env_value(os.getenv(name, str(default))) or str(default)))
+		raw = os.getenv(name, None)
+		text = _clean_env_value(raw)
+		if text == "":
+			return default
+		return int(text)
 	except Exception:
 		return default
 
 
 def _env_float(name: str, default: float) -> float:
 	try:
-		return float(_clean_env_value(os.getenv(name, str(default))) or str(default))
+		raw = os.getenv(name, None)
+		text = _clean_env_value(raw)
+		if text == "":
+			return default
+		return float(text)
 	except Exception:
 		return default
+
+
+# ===================================================
+# AI Token 成本估算配置
+# ===================================================
+# 说明：按 1K Token 计价，Prompt 与 Completion 可分别设置
+AI_TOKEN_PRICE_PER_1K_PROMPT = _env_float("AI_TOKEN_PRICE_PER_1K_PROMPT", 0.0)
+AI_TOKEN_PRICE_PER_1K_COMPLETION = _env_float("AI_TOKEN_PRICE_PER_1K_COMPLETION", 0.0)
+AI_TOKEN_CURRENCY = _clean_env_value(os.getenv("AI_TOKEN_CURRENCY", "USD")) or "USD"
 
 
 GROWTH_RATE_THRESHOLD = _env_int("GROWTH_RATE_THRESHOLD", 500)  # 近7日销量阈值
