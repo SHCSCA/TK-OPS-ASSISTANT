@@ -20,7 +20,8 @@ class VideoProcessor:
     def _lazy_moviepy(self):
         """延迟导入 moviepy，避免应用启动阶段拉起重依赖（numpy/imageio/ffmpeg）。"""
         try:
-            from moviepy.editor import VideoFileClip, vfx  # type: ignore
+            # Upgrade to moviepy 2.0+
+            from moviepy import VideoFileClip, vfx
             return VideoFileClip, vfx
         except Exception as e:
             raise ImportError(
@@ -117,15 +118,15 @@ class VideoProcessor:
             # 1. Trim head/tail
             if trim_head > 0 or trim_tail > 0:
                 trim_end = max(0, original_duration - trim_tail)
-                clip = clip.subclip(trim_head, trim_end)
+                clip = clip.subclipped(trim_head, trim_end)
             
             # 2. Horizontal flip (mirror)
             if apply_flip:
-                clip = clip.fx(vfx.mirror_x)
+                clip = clip.with_effects([vfx.MirrorX()])
             
             # 3. Global speed up
             if speed != 1.0:
-                clip = clip.speedx(speed)
+                clip = clip.with_speed_scaled(speed)
 
             # 4. Deep remix (micro zoom / subtle variations)
             # 说明：这里的目标不是“过度加工”，而是做轻量的、可控的差异化。
@@ -133,9 +134,9 @@ class VideoProcessor:
                 try:
                     w, h = int(original_size[0]), int(original_size[1])
                     zoom_factor = random.uniform(1.01, 1.04)
-                    clip = clip.fx(vfx.resize, zoom_factor)
+                    clip = clip.resized(new_size=zoom_factor)
                     # 居中裁切回原尺寸，避免分辨率变化
-                    clip = clip.crop(
+                    clip = clip.cropped(
                         x_center=clip.w / 2,
                         y_center=clip.h / 2,
                         width=w,
@@ -148,7 +149,6 @@ class VideoProcessor:
             # 5. Write output (preserves audio with AAC codec)
             clip.write_videofile(
                 str(output_path),
-                verbose=False,
                 logger=None,
                 audio_codec='aac'
             )

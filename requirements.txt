@@ -17,8 +17,8 @@ openai
 pandas==2.1.0
 openpyxl==3.1.2
 
-# Video Processing (V1.0 uses moviepy for simplicity)
-moviepy==1.0.3
+# Video Processing (Upgrade to 2.0+ for better performance)
+moviepy>=2.0.0
 
 # Image Processing
 Pillow==10.0.0

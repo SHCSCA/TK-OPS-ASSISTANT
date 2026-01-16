@@ -333,24 +333,26 @@ Output ONLY the script text, no formatting.
     def mix_audio_video(self, audio_path: str, subtitle_srt_path: str = ""):
         """使用 MoviePy 混合音视频（原声 2% + 合成配音），并可选烧录字幕。"""
         try:
-            # 懒加载 moviepy
-            from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+            # 懒加载 moviepy (Upgrade to 2.0+)
+            from moviepy import VideoFileClip, AudioFileClip, CompositeAudioClip, vfx
 
             video = VideoFileClip(self.video_path)
             new_audio = AudioFileClip(audio_path)
 
             # 处理原声：降低音量到 2%
             if video.audio:
-                original_audio = video.audio.volumex(0.02)
+                original_audio = video.audio.with_volume_scaled(0.02)
                 final_audio = CompositeAudioClip([original_audio, new_audio])
             else:
                 final_audio = new_audio
 
             # 时长对齐
             if new_audio.duration > video.duration:
-                video = video.loop(duration=new_audio.duration)
+                # video = video.loop(duration=new_audio.duration) # OLD
+                video = video.with_effects([vfx.Loop(duration=new_audio.duration)])
 
-            final_video = video.set_audio(final_audio)
+            # final_video = video.set_audio(final_audio) # OLD
+            final_video = video.with_audio(final_audio)
 
             output_path = str((Path(self.output_dir) / self._name_remix).resolve())
 
@@ -403,7 +405,7 @@ Output ONLY the script text, no formatting.
         - 时轴按音频总时长做均匀/按文本长度加权分配
         """
         try:
-            from moviepy.editor import AudioFileClip
+            from moviepy import AudioFileClip
 
             s = (script_text or "").strip()
             if not s:
@@ -792,7 +794,7 @@ Output ONLY the script text, no formatting.
 
         # 2) 回退 moviepy
         try:
-            from moviepy.editor import VideoFileClip
+            from moviepy import VideoFileClip
 
             clip = VideoFileClip(video_path)
             try:
