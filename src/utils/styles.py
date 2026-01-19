@@ -222,6 +222,13 @@ QTabBar::tab:hover {
     background-color: #2c2c2c;
 }
 
+/* 图文成片预览区 */
+QVideoWidget#PhotoPreview {
+    background-color: #2b2b2b;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+}
+
 /* 常用日志窗口（统一给 QTextEdit 用） */
 QTextEdit#LogView {
     background-color: #1e1e1e;
@@ -648,6 +655,13 @@ QTabBar::tab:selected {
 QTabBar::tab:hover {
     background-color: #f0f2f7;
     color: #1f2d3d;
+}
+
+/* 图文成片预览区（浅色） */
+QVideoWidget#PhotoPreview {
+    background-color: #f6f7fb;
+    border: 1px solid #d9deea;
+    border-radius: 8px;
 }
 QHeaderView::section {
     background-color: #f0f2f7;

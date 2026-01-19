@@ -21,7 +21,8 @@ from ui.profit_analysis import ProfitAnalysisWidget  # V2.0 替代蓝海监测
 from ui.material_factory import MaterialFactoryPanel
 from ui.crm import CRMWidget  # V2.0 新增
 from ui.downloader import DownloaderPanel
-from ui.ai_content_factory import AIContentFactoryPanel
+from ui.ai_content_factory import AIContentFactoryPanel, PhotoVideoPanel
+from ui.visual_lab import VisualLabPanel
 from ui.diagnostics import DiagnosticsPanel
 from ui.settings import SettingsPanel
 from ui.lan_airdrop import LanAirdropPanel
@@ -145,7 +146,9 @@ class MainWindow(QMainWindow):
         self.material_factory_panel = MaterialFactoryPanel()
         self.crm_panel = CRMWidget()  # V2.0 新增
         self.downloader_panel = DownloaderPanel()
-        self.ai_content_factory_panel = AIContentFactoryPanel()
+        self.ai_content_factory_panel = AIContentFactoryPanel(enable_photo=False)
+        self.photo_video_panel = PhotoVideoPanel()
+        self.visual_lab_panel = VisualLabPanel()
         self.lan_airdrop_panel = LanAirdropPanel()
         self.diagnostics_panel = DiagnosticsPanel()
         self.settings_panel = SettingsPanel()
@@ -157,6 +160,8 @@ class MainWindow(QMainWindow):
             self.crm_panel,
             self.downloader_panel,
             self.ai_content_factory_panel,
+            self.photo_video_panel,
+            self.visual_lab_panel,
             self.lan_airdrop_panel,
             self.diagnostics_panel,
             self.settings_panel,
@@ -200,6 +205,8 @@ class MainWindow(QMainWindow):
             "👥  账号矩阵",
             "⬇️  素材下载器",
             "🧠  AI 二创工厂",
+            "🖼️  图文成片",
+            "👁️  视觉实验室",
             "📡  局域网空投",
             "🧪  诊断中心",
             "⚙️  系统设置",
