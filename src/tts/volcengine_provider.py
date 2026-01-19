@@ -95,6 +95,7 @@ def synthesize_volcengine_token(
     encoding: str = "mp3",
     endpoint: str = "https://openspeech.bytedance.com/api/v1/tts",
     uid: str = "tk-ops-pro",
+    emotion: str = "",
 ) -> None:
     """豆包/火山 TTS（Token 模式）。
 
@@ -128,6 +129,10 @@ def synthesize_volcengine_token(
             "operation": "query",
         },
     }
+
+    # 情感参数（如 happy/sad/angry/surprise），留空则不传
+    if (emotion or "").strip():
+        payload["audio"]["emotion"] = (emotion or "").strip().lower()
 
     headers = {
         "Content-Type": "application/json",

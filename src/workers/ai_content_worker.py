@@ -35,6 +35,7 @@ class AIContentWorker(QThread):
         role_prompt: str = "",
         model: str = "",
         script_text: str = "",
+        script_json: dict | None = None,
     ):
         super().__init__()
         self.product_desc = product_desc
@@ -44,6 +45,7 @@ class AIContentWorker(QThread):
         self.role_prompt = role_prompt
         self.model = model
         self.script_text = (script_text or "").strip()
+        self.script_json = script_json or {}
         self._last_script_error: str = ""
         self._base_output_dir = str(output_dir)
         self._video_stem_raw = Path(video_path).stem
@@ -55,6 +57,7 @@ class AIContentWorker(QThread):
         # 统一的中文产物命名（每个视频单独文件夹内，文件名固定即可）
         self._name_script = "脚本.txt"
         self._name_voice = "配音.mp3"
+        self._name_voice_timeline = "配音_时间轴.mp3"
         self._name_captions = "字幕.srt"
         self._name_remix = "成片.mp4"
         self._name_remix_sub = "成片_带字幕.mp4"
@@ -110,8 +113,13 @@ class AIContentWorker(QThread):
                 self.progress.emit(25, f"📝 脚本已保存：{script_path}")
 
             # Step 2: 语音合成 (Edge-TTS)
-            self.progress.emit(40, "🎙️ 正在合成语音...")
-            audio_path, tts_error = self.synthesize_voice(script)
+            timeline = self._extract_timeline(self.script_json)
+            if timeline:
+                self.progress.emit(40, "🎙️ 正在合成语音（时间轴模式）...")
+                audio_path, tts_error = self.synthesize_timeline_voice(timeline)
+            else:
+                self.progress.emit(40, "🎙️ 正在合成语音...")
+                audio_path, tts_error = self.synthesize_voice(script)
 
             if not audio_path:
                 if self.skip_tts_failure:
@@ -128,7 +136,10 @@ class AIContentWorker(QThread):
             subtitle_srt = ""
             try:
                 self.progress.emit(60, "📝 正在生成字幕...")
-                subtitle_srt = self._save_subtitles(script_text=script, audio_path=audio_path)
+                if timeline:
+                    subtitle_srt = self._save_subtitles_with_timeline(timeline)
+                else:
+                    subtitle_srt = self._save_subtitles(script_text=script, audio_path=audio_path)
                 if subtitle_srt:
                     self.progress.emit(65, f"📝 字幕已生成：{subtitle_srt}")
                 else:
@@ -299,6 +310,8 @@ Output ONLY the script text, no formatting.
         audio_path = Path(self.output_dir) / self._name_voice
         provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
         fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
+        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
+        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
 
         def _try(p: str) -> None:
             tts_synthesize(text=text, out_path=audio_path, provider=p)
@@ -325,6 +338,93 @@ Output ONLY the script text, no formatting.
             logger.error(f"TTS 合成失败: {e}")
             return None, str(e)
 
+    def synthesize_timeline_voice(self, timeline: list[dict]) -> tuple[str, str]:
+        """根据时间轴逐段合成语音，并做弹性对齐。"""
+        try:
+            from moviepy import AudioFileClip, AudioClip, concatenate_audioclips
+        except Exception as e:
+            return "", f"MoviePy 依赖缺失：{e}"
+
+        audio_path = Path(self.output_dir) / self._name_voice_timeline
+
+        provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
+        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
+        clips = []
+        current_time = 0.0
+
+        def _silence(duration: float):
+            if duration <= 0:
+                return None
+            return AudioClip(lambda t: 0, duration=duration, fps=44100)
+
+        try:
+            for i, seg in enumerate(timeline):
+                if not isinstance(seg, dict):
+                    continue
+                try:
+                    start = float(seg.get("start", 0))
+                    end = float(seg.get("end", 0))
+                except Exception:
+                    continue
+                text = (seg.get("text", "") or "").strip()
+                emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
+                if not text or end <= start:
+                    continue
+
+                # gap
+                if start > current_time:
+                    gap = start - current_time
+                    s = _silence(gap)
+                    if s:
+                        clips.append(s)
+                        current_time += gap
+
+                seg_out = Path(self.output_dir) / f"tts_seg_{i:03d}.mp3"
+                try:
+                    tts_synthesize(text=text, out_path=seg_out, provider=provider, emotion=emotion)
+                except Exception as e:
+                    if fallback:
+                        try:
+                            tts_synthesize(text=text, out_path=seg_out, provider=fallback, emotion=emotion)
+                        except Exception as e2:
+                            return "", f"TTS 分段失败：{e}；备用失败：{e2}"
+                    else:
+                        return "", f"TTS 分段失败：{e}"
+
+                if not seg_out.exists():
+                    return "", "分段配音文件未生成"
+
+                clip = AudioFileClip(str(seg_out))
+                slot = max(0.1, end - start)
+                dur = float(getattr(clip, "duration", 0.0) or 0.0)
+
+                # 弹性对齐
+                if dur > slot:
+                    factor = dur / slot
+                    try:
+                        clip = clip.with_speed_scaled(factor)
+                    except Exception:
+                        pass
+                elif dur < slot:
+                    pad = slot - dur
+                    s = _silence(pad)
+                    if s:
+                        clips.append(clip)
+                        clips.append(s)
+                        current_time = end
+                        continue
+
+                clips.append(clip)
+                current_time = end
+
+            if not clips:
+                return "", "时间轴为空或无法生成配音"
+
+            final_audio = concatenate_audioclips(clips)
+            final_audio.write_audiofile(str(audio_path), logger=None)
+            return str(audio_path), ""
+        except Exception as e:
+            return "", f"时间轴配音失败：{e}"
     def _save_script(self, script: str) -> str:
         try:
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -334,6 +434,28 @@ Output ONLY the script text, no formatting.
         except Exception:
             return ""
 
+    def _extract_timeline(self, data: dict | None) -> list[dict]:
+        if not isinstance(data, dict):
+            return []
+        timeline = data.get("timeline")
+        if not isinstance(timeline, list):
+            return []
+        cleaned = []
+        for seg in timeline:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                start = float(seg.get("start", 0))
+                end = float(seg.get("end", 0))
+            except Exception:
+                continue
+            text = (seg.get("text", "") or "").strip()
+            emotion = (seg.get("emotion", "neutral") or "neutral").strip()
+            if not text or end <= start:
+                continue
+            cleaned.append({"start": start, "end": end, "text": text, "emotion": emotion})
+        cleaned.sort(key=lambda x: x["start"])
+        return cleaned
     def _copy_original_video(self, script_path: str = "") -> str:
         try:
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -449,6 +571,43 @@ Output ONLY the script text, no formatting.
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
             srt_path = str((Path(self.output_dir) / self._name_captions).resolve())
             Path(srt_path).write_text(srt_text, encoding="utf-8")
+            return srt_path
+        except Exception as e:
+            logger.error(f"字幕生成失败: {e}")
+            return ""
+
+    def _save_subtitles_with_timeline(self, timeline: list[dict]) -> str:
+        """按时间轴落点生成 SRT 字幕。"""
+        try:
+            if not timeline:
+                return ""
+
+            lines: list[str] = []
+            i = 1
+            for seg in timeline:
+                if not isinstance(seg, dict):
+                    continue
+                try:
+                    start = float(seg.get("start", 0))
+                    end = float(seg.get("end", 0))
+                except Exception:
+                    continue
+                text = (seg.get("text", "") or "").strip()
+                if not text or end <= start:
+                    continue
+
+                lines.append(str(i))
+                lines.append(f"{self._fmt_srt_ts(start)} --> {self._fmt_srt_ts(end)}")
+                lines.append(text)
+                lines.append("")
+                i += 1
+
+            if not lines:
+                return ""
+
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            srt_path = str((Path(self.output_dir) / self._name_captions).resolve())
+            Path(srt_path).write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
             return srt_path
         except Exception as e:
             logger.error(f"字幕生成失败: {e}")

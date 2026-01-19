@@ -14,9 +14,11 @@ import os
 import re
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import Qt, QTimer, QSize
+from PyQt5.QtGui import QDesktopServices, QIcon, QPixmap
 from PyQt5.QtCore import QUrl
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -33,24 +35,38 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QDoubleSpinBox,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
+    QSlider,
+    QProgressBar,
 )
 
 import config
 from workers.ai_content_worker import AIContentWorker
 from workers.ai_script_worker import AIScriptWorker
+from workers.timeline_script_worker import TimelineScriptWorker
+from workers.photo_video_worker import PhotoVideoWorker
 from utils.ui_log import append_log, install_log_context_menu
 
 
 class AIContentFactoryPanel(QWidget):
     """AI 二创工厂（视频自动二创）"""
 
-    def __init__(self):
+    def __init__(self, *, enable_photo: bool = True, photo_only: bool = False):
         super().__init__()
+        self._enable_photo = bool(enable_photo)
+        self._photo_only = bool(photo_only)
         self.worker: AIContentWorker | None = None
         self.script_worker: AIScriptWorker | None = None
+        self.photo_worker: PhotoVideoWorker | None = None
         self._approved_script_text: str = ""
         self._approved_script_json: dict | None = None
         self._token_usage = {"prompt": 0, "completion": 0, "total": 0}
+        self._photo_images: list[str] = []
+        self._photo_image_durations: list[float] = []
 
         # 自定义角色提示词：轻量防抖，避免频繁写 .env
         self._role_save_timer = QTimer(self)
@@ -67,9 +83,19 @@ class AIContentFactoryPanel(QWidget):
         self._init_ui()
 
     def _init_ui(self) -> None:
+        # 作用域修正：所有Tab和layout变量提前定义
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+
+        base_tab = QWidget()
+        script_tab = QWidget()
+        compose_tab = QWidget()
+        photo_tab = QWidget()
+        log_tab = QWidget()
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("AIContentTabs")
 
         title = QLabel("AI 二创工厂")
         title.setObjectName("h1")
@@ -81,10 +107,6 @@ class AIContentFactoryPanel(QWidget):
         )
         desc.setProperty("variant", "muted")
         layout.addWidget(desc)
-
-        # 可切换式界面：标签页（避免内容挤压）
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("AIContentTabs")
 
         # ===================== Tab 1: 基础信息 =====================
         base_tab = QWidget()
@@ -196,6 +218,26 @@ class AIContentFactoryPanel(QWidget):
         step1_title.setObjectName("h2")
         step1_form.addWidget(step1_title)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("脚本模式："))
+        self.script_mode_combo = QComboBox()
+        self.script_mode_combo.addItems([
+            "普通口播",
+            "精准卡点（时间轴）",
+        ])
+        self.script_mode_combo.currentIndexChanged.connect(self._on_script_mode_changed)
+        mode_row.addWidget(self.script_mode_combo)
+
+        mode_row.addWidget(QLabel("视频总时长(秒)："))
+        self.timeline_duration_spin = QDoubleSpinBox()
+        self.timeline_duration_spin.setRange(5.0, 120.0)
+        self.timeline_duration_spin.setSingleStep(1.0)
+        self.timeline_duration_spin.setValue(15.0)
+        self.timeline_duration_spin.setToolTip("精准卡点模式下，控制时间轴总时长")
+        mode_row.addWidget(self.timeline_duration_spin)
+        mode_row.addStretch(1)
+        step1_form.addLayout(mode_row)
+
         self.script_status_label = QLabel("状态：未生成")
         self.script_status_label.setProperty("variant", "muted")
         step1_form.addWidget(self.script_status_label)
@@ -212,6 +254,17 @@ class AIContentFactoryPanel(QWidget):
         except Exception:
             pass
         step1_form.addWidget(self.script_preview)
+
+        self.timeline_table = QTableWidget(0, 4)
+        self.timeline_table.setHorizontalHeaderLabels(["开始", "结束", "文案", "情感"])
+        self.timeline_table.setMinimumHeight(220)
+        self.timeline_table.setVisible(False)
+        step1_form.addWidget(self.timeline_table)
+
+        try:
+            self._on_script_mode_changed()
+        except Exception:
+            pass
 
         # Token 成本显示（按钮行上方）
         self.script_token_summary = QLabel("本次 Token 消耗：P(输入)=0 / C(输出)=0 / T(合计)=0 | 费用：未配置")
@@ -417,7 +470,166 @@ class AIContentFactoryPanel(QWidget):
         compose_layout.addWidget(step2_frame)
         compose_layout.addStretch(1)
 
-        # ===================== Tab 4: 运行日志 =====================
+        # ===================== Tab 4: 图文成片 =====================
+        photo_tab = QWidget()
+        photo_layout = QVBoxLayout(photo_tab)
+        photo_layout.setContentsMargins(0, 0, 0, 0)
+        photo_layout.setSpacing(12)
+
+        photo_frame = QFrame()
+        photo_frame.setProperty("class", "config-frame")
+        photo_form = QVBoxLayout(photo_frame)
+
+        photo_title = QLabel("图文成片引擎")
+        photo_title.setObjectName("h2")
+        photo_form.addWidget(photo_title)
+
+        photo_tip = QLabel("用途：仅用图片 + 文案，自动生成带口播的短视频。")
+        photo_tip.setProperty("variant", "muted")
+        photo_form.addWidget(photo_tip)
+
+        photo_form.addWidget(QLabel("商品/文案描述："))
+        self.photo_desc_input = QTextEdit()
+        self.photo_desc_input.setPlaceholderText("输入卖点/文案，用于生成时间轴口播")
+        self.photo_desc_input.setMinimumHeight(120)
+        photo_form.addWidget(self.photo_desc_input)
+
+        img_row = QHBoxLayout()
+        img_row.addWidget(QLabel("图片文件："))
+        pick_img_btn = QPushButton("选择图片")
+        pick_img_btn.clicked.connect(self._pick_photo_images)
+        img_row.addWidget(pick_img_btn)
+        clear_img_btn = QPushButton("清空列表")
+        clear_img_btn.clicked.connect(self._clear_photo_images)
+        img_row.addWidget(clear_img_btn)
+        img_row.addStretch(1)
+        photo_form.addLayout(img_row)
+
+        self.photo_list_widget = QListWidget()
+        self.photo_list_widget.setMinimumHeight(140)
+        self.photo_list_widget.setIconSize(QSize(96, 96))
+        self.photo_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.photo_list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        try:
+            self.photo_list_widget.currentRowChanged.connect(self._on_photo_item_selected)
+        except Exception:
+            pass
+        try:
+            self.photo_list_widget.model().rowsMoved.connect(self._on_photo_list_reordered)
+        except Exception:
+            pass
+        photo_form.addWidget(self.photo_list_widget)
+
+        dur_item_row = QHBoxLayout()
+        dur_item_row.addWidget(QLabel("当前图片时长(秒)："))
+        self.photo_item_duration_spin = QDoubleSpinBox()
+        self.photo_item_duration_spin.setRange(0.5, 30.0)
+        self.photo_item_duration_spin.setSingleStep(0.5)
+        self.photo_item_duration_spin.setValue(2.0)
+        self.photo_item_duration_spin.setEnabled(False)
+        try:
+            self.photo_item_duration_spin.valueChanged.connect(self._on_photo_duration_changed)
+        except Exception:
+            pass
+        dur_item_row.addWidget(self.photo_item_duration_spin)
+
+        apply_all_btn = QPushButton("应用到全部")
+        apply_all_btn.clicked.connect(self._apply_photo_duration_all)
+        dur_item_row.addWidget(apply_all_btn)
+        dur_item_row.addStretch(1)
+        photo_form.addLayout(dur_item_row)
+
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("输出目录："))
+        default_photo_out = str((getattr(config, "OUTPUT_DIR", Path("Output")) / "AI_Videos" / "Photo_Videos").resolve())
+        self.photo_output_input = QLineEdit(default_photo_out)
+        out_row.addWidget(self.photo_output_input, 1)
+        out_pick = QPushButton("选择目录")
+        out_pick.clicked.connect(self._pick_photo_output_dir)
+        out_row.addWidget(out_pick)
+        photo_form.addLayout(out_row)
+
+        bgm_row = QHBoxLayout()
+        bgm_row.addWidget(QLabel("背景音乐(可选)："))
+        self.photo_bgm_input = QLineEdit()
+        self.photo_bgm_input.setPlaceholderText("可选：选择 BGM 音频")
+        bgm_row.addWidget(self.photo_bgm_input, 1)
+        bgm_pick = QPushButton("选择音频")
+        bgm_pick.clicked.connect(self._pick_photo_bgm)
+        bgm_row.addWidget(bgm_pick)
+        photo_form.addLayout(bgm_row)
+
+        dur_row = QHBoxLayout()
+        dur_row.addWidget(QLabel("视频总时长(秒)："))
+        self.photo_duration_spin = QDoubleSpinBox()
+        self.photo_duration_spin.setRange(5.0, 120.0)
+        self.photo_duration_spin.setSingleStep(1.0)
+        self.photo_duration_spin.setValue(15.0)
+        dur_row.addWidget(self.photo_duration_spin)
+        dur_row.addStretch(1)
+        photo_form.addLayout(dur_row)
+
+
+        # 预览播放相关控件
+        preview_row = QHBoxLayout()
+        self.photo_preview_btn = QPushButton("预览播放")
+        self.photo_preview_btn.setProperty("variant", "success")
+        self.photo_preview_btn.clicked.connect(self._on_photo_preview)
+        preview_row.addWidget(self.photo_preview_btn)
+        preview_row.addWidget(QLabel("音量"))
+        self.photo_preview_volume_slider = QSlider(Qt.Horizontal)
+        self.photo_preview_volume_slider.setRange(0, 100)
+        try:
+            self.photo_preview_volume_slider.setValue(int(getattr(config, "PHOTO_PREVIEW_VOLUME", 80) or 80))
+        except Exception:
+            self.photo_preview_volume_slider.setValue(80)
+        self.photo_preview_volume_slider.setFixedWidth(120)
+        self.photo_preview_volume_slider.valueChanged.connect(self._on_preview_volume_changed)
+        preview_row.addWidget(self.photo_preview_volume_slider)
+        preview_row.addStretch(1)
+        photo_form.addLayout(preview_row)
+
+        progress_row = QHBoxLayout()
+        self.photo_preview_slider = QSlider(Qt.Horizontal)
+        self.photo_preview_slider.setRange(0, 1000)
+        self.photo_preview_slider.setValue(0)
+        self.photo_preview_slider.sliderMoved.connect(self._on_preview_seek)
+        progress_row.addWidget(self.photo_preview_slider, 1)
+
+        self.photo_preview_time_label = QLabel("00:00 / 00:00")
+        self.photo_preview_time_label.setProperty("variant", "muted")
+        progress_row.addWidget(self.photo_preview_time_label)
+        photo_form.addLayout(progress_row)
+
+        # 视频预览区
+        self.photo_video_widget = QVideoWidget()
+        self.photo_video_widget.setMinimumHeight(220)
+        self.photo_video_widget.setObjectName("PhotoPreview")
+        photo_form.addWidget(self.photo_video_widget)
+
+        photo_btn_row = QHBoxLayout()
+        self.photo_start_btn = QPushButton("生成图文视频")
+        self.photo_start_btn.setProperty("variant", "primary")
+        self.photo_start_btn.clicked.connect(self._start_photo_video)
+        photo_btn_row.addWidget(self.photo_start_btn)
+
+        photo_log_btn = QPushButton("查看日志")
+        photo_log_btn.clicked.connect(lambda: self._switch_to_tab("log"))
+        photo_btn_row.addWidget(photo_log_btn)
+        photo_btn_row.addStretch(1)
+        photo_form.addLayout(photo_btn_row)
+
+        photo_layout.addWidget(photo_frame)
+        photo_layout.addStretch(1)
+
+        # 初始化播放器
+        self.photo_media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+        self.photo_media_player.setVideoOutput(self.photo_video_widget)
+        self.photo_media_player.positionChanged.connect(self._on_preview_position_changed)
+        self.photo_media_player.durationChanged.connect(self._on_preview_duration_changed)
+        self._preview_duration_ms = 0
+
+        # ===================== Tab 5: 运行日志 =====================
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
         log_layout.setContentsMargins(0, 0, 0, 0)
@@ -445,10 +657,14 @@ class AIContentFactoryPanel(QWidget):
         log_layout.addWidget(log_frame, 1)
 
         # Tab 注册
-        self.tabs.addTab(base_tab, "① 基础信息")
-        self.tabs.addTab(script_tab, "② 脚本生成")
-        self.tabs.addTab(compose_tab, "③ 合成输出")
-        self.tabs.addTab(log_tab, "运行日志")
+        self._tab_index = {}
+        if not self._photo_only:
+            self._tab_index["base"] = self.tabs.addTab(base_tab, "① 基础信息")
+            self._tab_index["script"] = self.tabs.addTab(script_tab, "② 脚本生成")
+            self._tab_index["compose"] = self.tabs.addTab(compose_tab, "③ 合成输出")
+        if self._enable_photo:
+            self._tab_index["photo"] = self.tabs.addTab(photo_tab, "④ 图文成片")
+        self._tab_index["log"] = self.tabs.addTab(log_tab, "运行日志")
 
         layout.addWidget(self.tabs, 1)
 
@@ -457,17 +673,134 @@ class AIContentFactoryPanel(QWidget):
     def _switch_to_tab(self, key: str) -> None:
         try:
             key = (key or "").strip().lower()
-            mapping = {
-                "base": 0,
-                "script": 1,
-                "compose": 2,
-                "log": 3,
-            }
-            idx = mapping.get(key, None)
+            idx = None
+            try:
+                idx = self._tab_index.get(key, None)
+            except Exception:
+                idx = None
             if idx is None:
                 return
             if hasattr(self, "tabs"):
                 self.tabs.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+    def _on_photo_preview(self) -> None:
+        """图文成片预览播放：合成临时视频并播放"""
+        try:
+            if not self.photo_worker:
+                self.photo_worker = PhotoVideoWorker()
+            try:
+                self._sync_photo_durations()
+            except Exception:
+                pass
+            images = self._photo_images.copy()
+            durations = self._photo_image_durations.copy()
+            desc = self.photo_desc_input.toPlainText().strip()
+            bgm = self.photo_bgm_input.text().strip()
+            duration = self.photo_duration_spin.value()
+            from tempfile import gettempdir
+            import uuid
+            tmp_out = os.path.join(gettempdir(), f"tk_photo_preview_{uuid.uuid4().hex[:8]}.mp4")
+            try:
+                self._preview_duration_ms = 0
+                self.photo_preview_slider.setValue(0)
+                self.photo_preview_time_label.setText("00:00 / 00:00")
+            except Exception:
+                pass
+            self.photo_worker.generate_preview(
+                images=images,
+                desc=desc,
+                bgm=bgm,
+                duration=duration,
+                image_durations=durations,
+                output_path=tmp_out,
+                callback=lambda path: self._play_photo_preview(path),
+            )
+            self._append("[图文成片] 正在生成预览视频...", level="INFO")
+        except Exception as e:
+            self._append(f"[图文成片] 预览失败：{e}", level="ERROR")
+
+    def _play_photo_preview(self, path: str | None) -> None:
+        """播放预览视频"""
+        try:
+            if not path or not os.path.exists(path):
+                self._append("[图文成片] 预览文件不存在", level="ERROR")
+                return
+            self.photo_media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            try:
+                self.photo_media_player.setVolume(int(self.photo_preview_volume_slider.value()))
+            except Exception:
+                pass
+            self.photo_media_player.play()
+            self._append("[图文成片] 预览播放中...", level="INFO")
+        except Exception as e:
+            self._append(f"[图文成片] 播放失败：{e}", level="ERROR")
+
+    def _on_preview_position_changed(self, pos: int) -> None:
+        try:
+            if self._preview_duration_ms <= 0:
+                return
+            ratio = max(0.0, min(1.0, pos / max(1, self._preview_duration_ms)))
+            self.photo_preview_slider.blockSignals(True)
+            self.photo_preview_slider.setValue(int(ratio * 1000))
+            self.photo_preview_slider.blockSignals(False)
+            self.photo_preview_time_label.setText(
+                f"{self._format_time_ms(pos)} / {self._format_time_ms(self._preview_duration_ms)}"
+            )
+        except Exception:
+            pass
+
+    def _on_preview_duration_changed(self, duration: int) -> None:
+        try:
+            self._preview_duration_ms = int(duration or 0)
+            self.photo_preview_time_label.setText(
+                f"00:00 / {self._format_time_ms(self._preview_duration_ms)}"
+            )
+        except Exception:
+            pass
+
+    def _on_preview_seek(self, value: int) -> None:
+        try:
+            if self._preview_duration_ms <= 0:
+                return
+            target = int(self._preview_duration_ms * (value / 1000.0))
+            self.photo_media_player.setPosition(target)
+        except Exception:
+            pass
+
+    def _on_preview_volume_changed(self, value: int) -> None:
+        try:
+            self.photo_media_player.setVolume(int(value))
+        except Exception:
+            pass
+
+    def _format_time_ms(self, ms: int) -> str:
+        try:
+            total = max(0, int(ms // 1000))
+            m = total // 60
+            s = total % 60
+            return f"{m:02d}:{s:02d}"
+        except Exception:
+            return "00:00"
+
+    def _on_script_mode_changed(self) -> None:
+        try:
+            is_timeline = self.script_mode_combo.currentIndex() == 1
+            self.timeline_duration_spin.setEnabled(is_timeline)
+            self.timeline_table.setVisible(is_timeline)
+        except Exception:
+            pass
+
+    def _fill_timeline_table(self, timeline: list[dict]) -> None:
+        try:
+            self.timeline_table.setRowCount(0)
+            for i, seg in enumerate(timeline):
+                self.timeline_table.insertRow(i)
+                self.timeline_table.setItem(i, 0, QTableWidgetItem(str(seg.get("start", ""))))
+                self.timeline_table.setItem(i, 1, QTableWidgetItem(str(seg.get("end", ""))))
+                self.timeline_table.setItem(i, 2, QTableWidgetItem(str(seg.get("text", ""))))
+                self.timeline_table.setItem(i, 3, QTableWidgetItem(str(seg.get("emotion", ""))))
         except Exception:
             pass
 
@@ -772,6 +1105,7 @@ class AIContentFactoryPanel(QWidget):
             skip_tts_failure=skip_tts,
             role_prompt=role_prompt,
             script_text=self._approved_script_text,
+            script_json=self._approved_script_json,
         )
         self.worker.progress.connect(lambda p, m: self._append(f"[{p:>3}%] {m}"))
         self.worker.finished.connect(self._on_done)
@@ -807,17 +1141,32 @@ class AIContentFactoryPanel(QWidget):
 
         role_prompt = self._role_prompt_from_ui()
 
-        self._append("开始执行 Step 1：脚本生成（严格校验）...")
+        is_timeline = False
+        try:
+            is_timeline = self.script_mode_combo.currentIndex() == 1
+        except Exception:
+            is_timeline = False
+
+        self._append("开始执行 Step 1：脚本生成（严格校验）..." if not is_timeline else "开始执行 Step 1：时间轴脚本生成...")
 
         self.gen_script_btn.setEnabled(False)
 
-        self.script_worker = AIScriptWorker(
-            product_desc=desc,
-            role_prompt=role_prompt,
-            model=(getattr(config, "AI_MODEL", "") or "").strip(),
-            max_attempts=3,
-            strict_validation=True,
-        )
+        if is_timeline:
+            self.script_worker = TimelineScriptWorker(
+                product_desc=desc,
+                total_duration=float(self.timeline_duration_spin.value()),
+                role_prompt=role_prompt,
+                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                max_attempts=3,
+            )
+        else:
+            self.script_worker = AIScriptWorker(
+                product_desc=desc,
+                role_prompt=role_prompt,
+                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                max_attempts=3,
+                strict_validation=True,
+            )
         self.script_worker.log_signal.connect(lambda m: self._append(m))
         self.script_worker.progress_signal.connect(lambda p: self._append(f"[{p:>3}%] Step1 脚本生成..."))
         self.script_worker.data_signal.connect(self._on_script_data)
@@ -838,6 +1187,20 @@ class AIContentFactoryPanel(QWidget):
             QMessageBox.warning(self, "未通过校验", "当前脚本未通过严格校验，请点击‘不通过，重新生成’。")
             return
 
+        # 时间轴模式：同步表格内容
+        try:
+            if self.script_mode_combo.currentIndex() == 1:
+                timeline = self._read_timeline_table()
+                if timeline:
+                    self._approved_script_json = {
+                        **(self._approved_script_json or {}),
+                        "timeline": timeline,
+                        "full_script": " ".join([x.get("text", "") for x in timeline]).strip(),
+                    }
+                    self._approved_script_text = self._approved_script_json.get("full_script", "")
+        except Exception:
+            pass
+
         self.script_status_label.setText("状态：已通过（可开始合成）")
         self.script_status_label.setProperty("variant", "muted")
         self.start_btn.setEnabled(True)
@@ -848,13 +1211,39 @@ class AIContentFactoryPanel(QWidget):
 
     def _on_script_data(self, data: object) -> None:
         # 可能是规范化脚本 JSON，也可能是失败兜底 raw
-        if isinstance(data, dict) and data.get("full_script"):
+        if isinstance(data, dict) and data.get("timeline"):
+            timeline = data.get("timeline") or []
+            self._fill_timeline_table(timeline if isinstance(timeline, list) else [])
+            script_text = (data.get("full_script") or "").strip()
+            self.script_preview.setPlainText(script_text)
+            self._approved_script_text = script_text
+            self._approved_script_json = data
+        elif isinstance(data, dict) and data.get("full_script"):
             script_text = (data.get("full_script") or "").strip()
             self.script_preview.setPlainText(script_text)
             self._approved_script_text = script_text
             self._approved_script_json = data
         elif isinstance(data, dict) and data.get("raw"):
             self.script_preview.setPlainText(str(data.get("raw") or ""))
+
+    def _read_timeline_table(self) -> list[dict]:
+        timeline: list[dict] = []
+        try:
+            rows = self.timeline_table.rowCount()
+            for r in range(rows):
+                try:
+                    start = float(self.timeline_table.item(r, 0).text()) if self.timeline_table.item(r, 0) else 0.0
+                    end = float(self.timeline_table.item(r, 1).text()) if self.timeline_table.item(r, 1) else 0.0
+                except Exception:
+                    continue
+                text = (self.timeline_table.item(r, 2).text() if self.timeline_table.item(r, 2) else "").strip()
+                emotion = (self.timeline_table.item(r, 3).text() if self.timeline_table.item(r, 3) else "neutral").strip()
+                if not text or end <= start:
+                    continue
+                timeline.append({"start": start, "end": end, "text": text, "emotion": emotion})
+        except Exception:
+            return []
+        return timeline
 
     def _on_script_done(self, ok: bool, message: str) -> None:
         self.gen_script_btn.setEnabled(True)
@@ -877,12 +1266,18 @@ class AIContentFactoryPanel(QWidget):
 
     def _role_prompt_from_ui(self) -> str:
         # 1) 自定义优先
-        custom = (self.role_input.toPlainText() if hasattr(self, "role_input") else "").strip()
+        try:
+            custom = (self.role_input.toPlainText() if hasattr(self, "role_input") else "").strip()
+        except RuntimeError:
+            custom = ""
         if custom:
             return custom
 
         # 2) 预设角色
-        text = (self.role_combo.currentText() or "").strip()
+        try:
+            text = (self.role_combo.currentText() or "").strip()
+        except RuntimeError:
+            text = ""
         if not text or text.startswith("默认"):
             return ""
         mapping = {
@@ -906,6 +1301,197 @@ class AIContentFactoryPanel(QWidget):
         self.start_btn.setEnabled(True)
         self.worker = None
 
+    def _pick_photo_images(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择图片",
+            "",
+            "Images (*.jpg *.jpeg *.png *.webp);;All Files (*)",
+        )
+        if files:
+            total_after = len(self._photo_images) + len(files)
+            default_dur = max(0.5, float(self.photo_duration_spin.value()) / max(1, total_after))
+            for f in files:
+                self._photo_images.append(f)
+                self._photo_image_durations.append(default_dur)
+            self._update_photo_list()
+
+    def _clear_photo_images(self) -> None:
+        self._photo_images = []
+        self._photo_image_durations = []
+        self._update_photo_list()
+
+    def _update_photo_list(self) -> None:
+        try:
+            self.photo_list_widget.clear()
+            self._sync_photo_durations()
+            for idx, p in enumerate(self._photo_images):
+                dur = self._photo_image_durations[idx] if idx < len(self._photo_image_durations) else 2.0
+                item = QListWidgetItem(f"{Path(p).name}  ({dur:.1f}s)")
+                try:
+                    pix = QPixmap(p)
+                    if not pix.isNull():
+                        item.setIcon(QIcon(pix))
+                except Exception:
+                    pass
+                item.setData(Qt.UserRole, p)
+                item.setData(Qt.UserRole + 1, float(dur))
+                self.photo_list_widget.addItem(item)
+            if self.photo_list_widget.count() > 0:
+                self.photo_list_widget.setCurrentRow(0)
+        except Exception:
+            pass
+
+    def _on_photo_list_reordered(self) -> None:
+        try:
+            ordered = []
+            ordered_durations = []
+            for i in range(self.photo_list_widget.count()):
+                item = self.photo_list_widget.item(i)
+                p = item.data(Qt.UserRole) if item else None
+                if p:
+                    ordered.append(str(p))
+                    try:
+                        ordered_durations.append(float(item.data(Qt.UserRole + 1) or 0))
+                    except Exception:
+                        ordered_durations.append(2.0)
+            if ordered:
+                self._photo_images = ordered
+                self._photo_image_durations = ordered_durations
+        except Exception:
+            pass
+
+    def _sync_photo_durations(self) -> None:
+        if len(self._photo_image_durations) < len(self._photo_images):
+            default_dur = max(0.5, float(self.photo_duration_spin.value()) / max(1, len(self._photo_images)))
+            for _ in range(len(self._photo_images) - len(self._photo_image_durations)):
+                self._photo_image_durations.append(default_dur)
+        if len(self._photo_image_durations) > len(self._photo_images):
+            self._photo_image_durations = self._photo_image_durations[: len(self._photo_images)]
+
+    def _on_photo_item_selected(self, row: int) -> None:
+        try:
+            if row < 0 or row >= len(self._photo_image_durations):
+                self.photo_item_duration_spin.setEnabled(False)
+                return
+            self.photo_item_duration_spin.blockSignals(True)
+            self.photo_item_duration_spin.setValue(float(self._photo_image_durations[row]))
+            self.photo_item_duration_spin.blockSignals(False)
+            self.photo_item_duration_spin.setEnabled(True)
+        except Exception:
+            pass
+
+    def _on_photo_duration_changed(self, value: float) -> None:
+        try:
+            row = self.photo_list_widget.currentRow()
+            if row < 0 or row >= len(self._photo_image_durations):
+                return
+            self._photo_image_durations[row] = float(value)
+            item = self.photo_list_widget.item(row)
+            if item:
+                name = Path(item.data(Qt.UserRole)).name
+                item.setText(f"{name}  ({float(value):.1f}s)")
+                item.setData(Qt.UserRole + 1, float(value))
+        except Exception:
+            pass
+
+    def _apply_photo_duration_all(self) -> None:
+        try:
+            value = float(self.photo_item_duration_spin.value())
+            self._photo_image_durations = [value for _ in self._photo_images]
+            self._update_photo_list()
+        except Exception:
+            pass
+
+    def _pick_photo_output_dir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        if d:
+            self.photo_output_input.setText(d)
+
+    def _pick_photo_bgm(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择背景音乐",
+            "",
+            "Audio Files (*.mp3 *.wav *.m4a);;All Files (*)",
+        )
+        if file_path:
+            self.photo_bgm_input.setText(file_path)
+
+    def _start_photo_video(self) -> None:
+        try:
+            if self.photo_worker:
+                QMessageBox.information(self, "提示", "图文成片进行中，请稍候。")
+                return
+            if self.worker or self.script_worker:
+                QMessageBox.information(self, "提示", "其他任务进行中，请稍候完成后再试。")
+                return
+            desc = (self.photo_desc_input.toPlainText() or "").strip() or (self.desc_input.toPlainText() or "").strip()
+            if not desc:
+                QMessageBox.warning(self, "参数缺失", "请先填写【商品/文案描述】。")
+                return
+
+            if not self._photo_images:
+                QMessageBox.warning(self, "参数缺失", "请先选择图片文件。")
+                return
+            try:
+                self._sync_photo_durations()
+            except Exception:
+                pass
+
+            out_dir = (self.photo_output_input.text() or "").strip()
+            if not out_dir:
+                QMessageBox.warning(self, "参数缺失", "请选择输出目录。")
+                return
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                QMessageBox.warning(self, "目录不可用", f"输出目录创建失败：{e}")
+                return
+
+            self.log_view.clear()
+            self._reset_token_usage()
+            self._append("开始执行 图文成片...")
+
+            self._switch_to_tab("log")
+
+            role_prompt = self._role_prompt_from_ui()
+            bgm_path = (self.photo_bgm_input.text() or "").strip()
+
+            self.photo_start_btn.setEnabled(False)
+
+            self.photo_worker = PhotoVideoWorker(
+                images=self._photo_images,
+                product_desc=desc,
+                output_dir=out_dir,
+                image_durations=self._photo_image_durations,
+                role_prompt=role_prompt,
+                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                bgm_path=bgm_path,
+                total_duration=float(self.photo_duration_spin.value()),
+            )
+            self.photo_worker.log_signal.connect(lambda m: self._append(m))
+            self.photo_worker.done_signal.connect(self._on_photo_done)
+            self.photo_worker.start()
+        except Exception as e:
+            try:
+                self._append(f"图文成片启动异常：{e}", level="ERROR")
+            except Exception:
+                pass
+            try:
+                self.photo_start_btn.setEnabled(True)
+            except Exception:
+                pass
+            self.photo_worker = None
+
+    def _on_photo_done(self, ok: bool, message: str) -> None:
+        self.photo_start_btn.setEnabled(True)
+        if ok:
+            self._append(message or "图文成片完成")
+        else:
+            self._append(message or "图文成片失败", level="ERROR")
+        self.photo_worker = None
+
     def shutdown(self) -> None:
         try:
             if self.script_worker:
@@ -918,5 +1504,34 @@ class AIContentFactoryPanel(QWidget):
                 self.worker.quit()
                 if not self.worker.wait(800):
                     self.worker.terminate()
+        except Exception:
+            pass
+
+
+class PhotoVideoPanel(QWidget):
+    """图文成片独立模块（左侧菜单入口）"""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.inner = AIContentFactoryPanel(enable_photo=True, photo_only=True)
+        layout.addWidget(self.inner)
+
+        try:
+            if hasattr(self.inner, "_tab_index"):
+                idx = self.inner._tab_index.get("photo")
+                if idx is not None:
+                    self.inner.tabs.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+        self.setLayout(layout)
+
+    def shutdown(self) -> None:
+        try:
+            self.inner.shutdown()
         except Exception:
             pass

@@ -124,6 +124,9 @@ AI_PROVIDER = _clean_env_value(os.getenv("AI_PROVIDER", "openai")) or "openai"  
 AI_API_KEY = _clean_env_value(os.getenv("AI_API_KEY", "")) or _clean_env_value(os.getenv("DEEPSEEK_API_KEY", ""))
 AI_BASE_URL = _clean_env_value(os.getenv("AI_BASE_URL", ""))  # 例如：https://api.deepseek.com
 AI_MODEL = _clean_env_value(os.getenv("AI_MODEL", "gpt-4o-mini")) or "gpt-4o-mini"
+AI_VISION_MODEL = _clean_env_value(os.getenv("AI_VISION_MODEL", "")) or ""
+if not AI_VISION_MODEL:
+	AI_VISION_MODEL = AI_MODEL
 AI_SYSTEM_PROMPT = _clean_env_value(os.getenv("AI_SYSTEM_PROMPT", ""))
 
 # 火山方舟（Ark）可选参数：深度思考模式。
@@ -239,6 +242,16 @@ VIDEO_REMIX_ADD_NOISE = os.getenv("VIDEO_REMIX_ADD_NOISE", "0") == "1"
 VIDEO_REMIX_STRIP_METADATA = os.getenv("VIDEO_REMIX_STRIP_METADATA", "1") == "1"
 
 # ===================================================
+# 图文成片（V2.0）默认参数
+# ===================================================
+PHOTO_VIDEO_FPS = _env_int("PHOTO_VIDEO_FPS", 24)
+PHOTO_PREVIEW_VOLUME = _env_int("PHOTO_PREVIEW_VOLUME", 80)
+TIKTOK_VIDEO_BITRATE = _clean_env_value(os.getenv("TIKTOK_VIDEO_BITRATE", "3500k")) or "3500k"
+TIKTOK_MAXRATE = _clean_env_value(os.getenv("TIKTOK_MAXRATE", "3500k")) or "3500k"
+TIKTOK_BUFSIZE = _clean_env_value(os.getenv("TIKTOK_BUFSIZE", "7000k")) or "7000k"
+TIKTOK_AUDIO_BITRATE = _clean_env_value(os.getenv("TIKTOK_AUDIO_BITRATE", "128k")) or "128k"
+
+# ===================================================
 # 利润估算模型
 # ===================================================
 TAOBAO_PRICE_RATIO = 0.2    # 成本估算模型：假设 1688 进货价为 TikTok 售价的 20%
@@ -306,6 +319,7 @@ def reload_config() -> None:
 	global ECHOTIK_API_KEY, ECHOTIK_API_SECRET
 	global RAPIDAPI_KEY, RAPIDAPI_HOST
 	global AI_PROVIDER, AI_API_KEY, AI_BASE_URL, AI_MODEL
+	global AI_VISION_MODEL
 	global AI_SYSTEM_PROMPT, AI_COPYWRITER_ROLE_PROMPT, AI_FACTORY_ROLE_PROMPT
 	global AI_OUTPUT_LANG
 	global ARK_THINKING_TYPE
@@ -315,6 +329,8 @@ def reload_config() -> None:
 	global DOWNLOAD_DIR
 	global LOG_LEVEL, THEME_MODE
 	global VIDEO_DEEP_REMIX_ENABLED, VIDEO_REMIX_MICRO_ZOOM, VIDEO_REMIX_ADD_NOISE, VIDEO_REMIX_STRIP_METADATA
+	global PHOTO_VIDEO_FPS, PHOTO_PREVIEW_VOLUME
+	global TIKTOK_VIDEO_BITRATE, TIKTOK_MAXRATE, TIKTOK_BUFSIZE, TIKTOK_AUDIO_BITRATE
 	global GROWTH_RATE_THRESHOLD, MAX_REVIEWS, PRICE_MIN, PRICE_MAX
 	global SUBTITLE_BURN_ENABLED, SUBTITLE_FONT_NAME
 	global SUBTITLE_FONT_AUTO, SUBTITLE_FONT_SIZE
@@ -332,6 +348,9 @@ def reload_config() -> None:
 	AI_API_KEY = _clean_env_value(os.getenv("AI_API_KEY", "")) or _clean_env_value(os.getenv("DEEPSEEK_API_KEY", ""))
 	AI_BASE_URL = _clean_env_value(os.getenv("AI_BASE_URL", ""))
 	AI_MODEL = _clean_env_value(os.getenv("AI_MODEL", "gpt-4o-mini")) or "gpt-4o-mini"
+	AI_VISION_MODEL = _clean_env_value(os.getenv("AI_VISION_MODEL", "")) or ""
+	if not AI_VISION_MODEL:
+		AI_VISION_MODEL = AI_MODEL
 	AI_SYSTEM_PROMPT = _clean_env_value(os.getenv("AI_SYSTEM_PROMPT", ""))
 	AI_OUTPUT_LANG = _clean_env_value(os.getenv("AI_OUTPUT_LANG", "en")) or "en"
 	ARK_THINKING_TYPE = _clean_env_value(os.getenv("ARK_THINKING_TYPE", ""))
@@ -366,6 +385,13 @@ def reload_config() -> None:
 	VIDEO_REMIX_MICRO_ZOOM = os.getenv("VIDEO_REMIX_MICRO_ZOOM", "1") == "1"
 	VIDEO_REMIX_ADD_NOISE = os.getenv("VIDEO_REMIX_ADD_NOISE", "0") == "1"
 	VIDEO_REMIX_STRIP_METADATA = os.getenv("VIDEO_REMIX_STRIP_METADATA", "1") == "1"
+
+	PHOTO_VIDEO_FPS = _env_int("PHOTO_VIDEO_FPS", 24)
+	PHOTO_PREVIEW_VOLUME = _env_int("PHOTO_PREVIEW_VOLUME", 80)
+	TIKTOK_VIDEO_BITRATE = _clean_env_value(os.getenv("TIKTOK_VIDEO_BITRATE", "3500k")) or "3500k"
+	TIKTOK_MAXRATE = _clean_env_value(os.getenv("TIKTOK_MAXRATE", "3500k")) or "3500k"
+	TIKTOK_BUFSIZE = _clean_env_value(os.getenv("TIKTOK_BUFSIZE", "7000k")) or "7000k"
+	TIKTOK_AUDIO_BITRATE = _clean_env_value(os.getenv("TIKTOK_AUDIO_BITRATE", "128k")) or "128k"
 
 	GROWTH_RATE_THRESHOLD = _env_int("GROWTH_RATE_THRESHOLD", 500)
 	MAX_REVIEWS = _env_int("MAX_REVIEWS", 50)
@@ -455,6 +481,7 @@ def sync_env_file() -> None:
 		"AI_BASE_URL": "",
 		"AI_API_KEY": "",
 		"AI_MODEL": "gpt-4o-mini",
+		"AI_VISION_MODEL": "",
 		"AI_SYSTEM_PROMPT": "",
 		"ARK_THINKING_TYPE": "",
 		"AI_COPYWRITER_ROLE_PROMPT": "",
@@ -485,6 +512,13 @@ def sync_env_file() -> None:
 		"VIDEO_REMIX_MICRO_ZOOM": "1",
 		"VIDEO_REMIX_ADD_NOISE": "0",
 		"VIDEO_REMIX_STRIP_METADATA": "1",
+		# 图文成片（V2.0）
+		"PHOTO_VIDEO_FPS": "24",
+		"PHOTO_PREVIEW_VOLUME": "80",
+		"TIKTOK_VIDEO_BITRATE": "3500k",
+		"TIKTOK_MAXRATE": "3500k",
+		"TIKTOK_BUFSIZE": "7000k",
+		"TIKTOK_AUDIO_BITRATE": "128k",
 		# 字幕样式（ffmpeg/libass）
 		"SUBTITLE_BURN_ENABLED": "true",
 		"SUBTITLE_FONT_NAME": "Microsoft YaHei UI",
