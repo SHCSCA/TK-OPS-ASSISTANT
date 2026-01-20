@@ -83,96 +83,113 @@ class VideoWorker(BaseWorker):
             f"（微缩放={'开' if self.micro_zoom else '关'}，加噪点={'开' if self.add_noise else '关'}，清除元数据={'开' if self.strip_metadata else '关'}）"
         )
             
+        total_videos = len(self.video_files)
+
         if not self.video_files:
             self.emit_error("未提供待处理的视频文件")
             self.emit_finished(False, "未提供视频文件")
             return
-            
-        total_videos = len(self.video_files)
+
         self.emit_log(f"待处理视频：{total_videos} 个")
 
         success_count = 0
         fail_count = 0
 
-        def _guess_output_filename(input_path: str) -> str:
-            try:
-                p = Path(input_path)
-                suffix = getattr(config, "VIDEO_OUTPUT_SUFFIX", "_processed")
-                return f"{p.stem}{suffix}{p.suffix}"
-            except Exception:
-                return ""
 
-        def _process_one_with_retry(video_path: str):
-            # 并行模式下使用独立 processor，避免计数器冲突
-            last_msg = ""
-            for attempt in range(self.max_retries + 1):
-                if self.should_stop():
-                    return video_path, (False, "已停止")
-                from video.processor import VideoProcessor
-                processor = VideoProcessor()
-                ok, msg = processor.process_video(
-                    video_path,
-                    trim_head=self.trim_head,
-                    trim_tail=self.trim_tail,
-                    speed=self.speed,
-                    apply_flip=self.apply_flip,
-                    deep_remix_enabled=self.deep_remix_enabled,
-                    micro_zoom=self.micro_zoom,
-                    add_noise=self.add_noise,
-                    strip_metadata=self.strip_metadata,
-                    custom_output_dir=self.output_dir,
-                )
-                last_msg = msg
-                if ok:
-                    return video_path, (True, msg)
-                if attempt < self.max_retries:
-                    self.emit_log(f"[WARN] 失败重试 {attempt + 1}/{self.max_retries}：{Path(video_path).name}")
-            return video_path, (False, last_msg)
+    def _guess_output_filename(self, input_path: str) -> str:
+        """猜测输出文件名（带后缀）"""
+        try:
+            p = Path(input_path)
+            suffix = getattr(config, "VIDEO_OUTPUT_SUFFIX", "_processed")
+            return f"{p.stem}{suffix}{p.suffix}"
+        except Exception:
+            return ""
 
-        if self.parallel_jobs <= 1 or total_videos <= 1:
-            for idx, video_file in enumerate(self.video_files):
-                if self.should_stop():
-                    break
+    def _process_one_with_retry(self, video_path: str):
+        """带重试的视频处理逻辑，支持 self 作用域。"""
+        last_msg = ""
+        for attempt in range(self.max_retries + 1):
+            if self.should_stop():
+                return video_path, (False, "已停止")
+            from video.processor import VideoProcessor
+            processor = VideoProcessor()
+            ok, msg = processor.process_video(
+                video_path,
+                trim_head=self.trim_head,
+                trim_tail=self.trim_tail,
+                speed=self.speed,
+                apply_flip=self.apply_flip,
+                deep_remix_enabled=self.deep_remix_enabled,
+                micro_zoom=self.micro_zoom,
+                add_noise=self.add_noise,
+                strip_metadata=self.strip_metadata,
+                custom_output_dir=self.output_dir,
+            )
+            last_msg = msg
+            if ok:
+                return video_path, (True, msg)
+            if attempt < self.max_retries:
+                self.emit_log(f"[WARN] 失败重试 {attempt + 1}/{self.max_retries}：{Path(video_path).name}")
+        return video_path, (False, last_msg)
 
-                self.emit_log(f"\n处理进度 ({idx + 1}/{total_videos})：{Path(video_file).name}")
-                start_ts = time.perf_counter()
-                path, (success, message) = _process_one_with_retry(video_file)
-                elapsed = time.perf_counter() - start_ts
-                self.emit_log(message)
 
-                if success:
-                    success_count += 1
-                else:
-                    fail_count += 1
+# =================== 半人马拼接 Worker ===================
+class CyborgComposeWorker(BaseWorker):
+    """半人马拼接 Worker（FFmpeg 一次性拼接）。"""
 
-                input_name = Path(path).name
-                self.processing_results.append(
-                    {
-                        "status": "成功" if success else "失败",
-                        "input": input_name,
-                        "output": _guess_output_filename(path),
-                        "elapsed": float(f"{elapsed:.2f}"),
-                        "error": "" if success else message,
-                        # 兼容导出字段
-                        "input_filename": input_name,
-                        "output_filename": _guess_output_filename(path),
-                        "original_duration": 0,
-                        "processed_duration": 0,
-                        "process_time": f"{elapsed:.2f}",
-                        "notes": message,
-                        # 兼容旧字段
-                        "success": success,
-                        "message": message,
-                    }
-                )
+    def __init__(
+        self,
+        intro_path: str,
+        mid_path: str,
+        outro_path: str,
+        output_dir: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.intro_path = (intro_path or "").strip()
+        self.mid_path = (mid_path or "").strip()
+        self.outro_path = (outro_path or "").strip()
+        self.output_dir = output_dir
 
-                progress = int((idx + 1) / total_videos * 100)
-                self.emit_progress(progress)
+    def _run_impl(self) -> None:
+        """执行半人马拼接并回传结果。"""
+        try:
+            if not self.intro_path or not self.mid_path or not self.outro_path:
+                self.emit_finished(False, "半人马拼接缺少素材路径")
+                return
+
+            self.emit_log("🧩 半人马拼接：开始处理...")
+            self.emit_progress(20)
+
+            from video.processor import VideoProcessor
+
+            processor = VideoProcessor()
+            ok, msg = processor.compose_cyborg_video(
+                intro_path=self.intro_path,
+                mid_path=self.mid_path,
+                outro_path=self.outro_path,
+                custom_output_dir=self.output_dir,
+            )
+
+            self.emit_progress(90)
+            if ok:
+                self.emit_log(f"✅ 半人马拼接完成：{msg}")
+                try:
+                    self.data_signal.emit({"output": msg})
+                except Exception:
+                    pass
+                self.emit_progress(100)
+                self.emit_finished(True, "半人马拼接完成")
+            else:
+                self.emit_log(f"❌ 半人马拼接失败：{msg}")
+                self.emit_finished(False, msg)
+        except Exception as e:
+            self.emit_log(f"❌ 半人马拼接异常：{e}")
+            self.emit_finished(False, f"半人马拼接异常：{e}")
         else:
             self.emit_log(f"并行模式：{self.parallel_jobs} 线程处理")
             completed = 0
             with ThreadPoolExecutor(max_workers=self.parallel_jobs) as pool:
-                futures = {pool.submit(_process_one_with_retry, p): p for p in self.video_files}
+                futures = {pool.submit(self._process_one_with_retry, p): p for p in self.video_files}
 
                 for fut in as_completed(futures):
                     completed += 1
@@ -209,12 +226,12 @@ class VideoWorker(BaseWorker):
                         {
                             "status": "成功" if success else "失败",
                             "input": input_name,
-                            "output": _guess_output_filename(input_file) if input_file else "",
+                            "output": self._guess_output_filename(input_file) if input_file else "",
                             "elapsed": float(f"{elapsed:.2f}") if elapsed else 0.0,
                             "error": "" if success else message,
                             # 兼容导出字段
                             "input_filename": input_name,
-                            "output_filename": _guess_output_filename(input_file) if input_file else "",
+                            "output_filename": self._guess_output_filename(input_file) if input_file else "",
                             "original_duration": 0,
                             "processed_duration": 0,
                             "process_time": f"{elapsed:.2f}" if elapsed else "",

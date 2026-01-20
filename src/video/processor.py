@@ -45,6 +45,209 @@ class VideoProcessor:
         except Exception as e:
             return False, str(e)
 
+    def _has_audio_stream(self, video_path: str) -> bool:
+        """检测视频是否包含音轨（用于半人马拼接）。"""
+        try:
+            ffprobe = shutil.which("ffprobe")
+            if not ffprobe:
+                return True
+            cmd = [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "default=nw=1:nk=1",
+                str(Path(video_path).resolve()),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            return (proc.stdout or "").strip() == "audio"
+        except Exception:
+            return True
+
+    def compose_cyborg_video(
+        self,
+        intro_path: str,
+        mid_path: str,
+        outro_path: str,
+        output_path: str | None = None,
+        custom_output_dir: str | None = None,
+    ) -> Tuple[bool, str]:
+        """“半人马”内容策略拼接：
+
+        结构：[0-2秒 原创] + [中间 混剪] + [5-7秒 原创]
+        使用 FFmpeg 一次性 concat，保证速度与稳定性。
+        """
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg:
+                return False, "未检测到 ffmpeg，无法执行半人马拼接。"
+
+            intro_file = Path(intro_path)
+            mid_file = Path(mid_path)
+            outro_file = Path(outro_path)
+            if not intro_file.exists() or not mid_file.exists() or not outro_file.exists():
+                return False, "半人马拼接失败：素材文件不存在。"
+
+            if output_path is None:
+                output_suffix = getattr(config, "VIDEO_OUTPUT_SUFFIX", "_processed")
+                output_filename = f"{mid_file.stem}_cyborg{output_suffix}{mid_file.suffix}"
+                if custom_output_dir:
+                    out_dir = Path(custom_output_dir)
+                else:
+                    out_dir = config.OUTPUT_DIR
+                output_path = out_dir / output_filename
+            else:
+                output_path = Path(output_path)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            intro_sec = float(getattr(config, "CYBORG_INTRO_SEC", 2.0) or 2.0)
+            outro_sec = float(getattr(config, "CYBORG_OUTRO_SEC", 2.0) or 2.0)
+
+            has_audio = all([
+                self._has_audio_stream(str(intro_file)),
+                self._has_audio_stream(str(mid_file)),
+                self._has_audio_stream(str(outro_file)),
+            ])
+
+            # 构造 filter_complex
+            vf_parts = [
+                f"[0:v]trim=0:{intro_sec},setpts=PTS-STARTPTS[v0]",
+                "[1:v]setpts=PTS-STARTPTS[v1]",
+                f"[2:v]trim=0:{outro_sec},setpts=PTS-STARTPTS[v2]",
+            ]
+            af_parts = []
+            if has_audio:
+                af_parts = [
+                    f"[0:a]atrim=0:{intro_sec},asetpts=PTS-STARTPTS[a0]",
+                    "[1:a]asetpts=PTS-STARTPTS[a1]",
+                    f"[2:a]atrim=0:{outro_sec},asetpts=PTS-STARTPTS[a2]",
+                ]
+
+            concat_part = "[v0][v1][v2]concat=n=3:v=1:a=0[vout]"
+            if has_audio:
+                concat_part = "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]"
+
+            filter_complex = ";".join(vf_parts + af_parts + [concat_part])
+
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(intro_file),
+                "-i",
+                str(mid_file),
+                "-i",
+                str(outro_file),
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[vout]",
+            ]
+            if has_audio:
+                cmd.extend(["-map", "[aout]"])
+            cmd.extend([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-c:a",
+                "aac",
+                str(output_path),
+            ])
+
+            ok, err = self._run_ffmpeg(cmd)
+            if not ok:
+                return False, f"半人马拼接失败: {err}"
+            return True, str(output_path)
+        except Exception as e:
+            return False, f"半人马拼接异常: {e}"
+
+    def process_video_ffmpeg_remix(
+        self,
+        input_path: str,
+        output_path: str | None = None,
+        custom_output_dir: str | None = None,
+    ) -> Tuple[bool, str]:
+        """使用 FFmpeg 完成素材清洗（非线性变速 + 色彩微调 + 像素位移）。"""
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg:
+                return False, "未检测到 ffmpeg，无法执行素材清洗。"
+
+            input_file = Path(input_path)
+            if not input_file.exists():
+                return False, f"未找到输入文件: {input_path}"
+
+            if output_path is None:
+                stem = input_file.stem
+                suffix = input_file.suffix
+                output_suffix = getattr(config, "VIDEO_OUTPUT_SUFFIX", "_processed")
+                output_filename = f"{stem}{output_suffix}{suffix}"
+                if custom_output_dir:
+                    out_dir = Path(custom_output_dir)
+                else:
+                    out_dir = config.OUTPUT_DIR
+                output_path = out_dir / output_filename
+            else:
+                output_path = Path(output_path)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # === 非线性变速（心跳剪辑）===
+            speed_min = float(getattr(config, "HEARTBEAT_SPEED_MIN", 0.9) or 0.9)
+            speed_max = float(getattr(config, "HEARTBEAT_SPEED_MAX", 1.1) or 1.1)
+            period = float(getattr(config, "HEARTBEAT_PERIOD_SEC", 4.0) or 4.0)
+            # 速度曲线：1 + A * sin(2πt/period)
+            amp = max(0.0, min(0.3, (speed_max - speed_min) / 2.0))
+            setpts = f"setpts=PTS/(1+{amp}*sin(2*PI*t/{period}))"
+
+            # === 光影重构（随机微调）===
+            gamma = round(random.uniform(0.97, 1.03), 3)
+            saturation = round(random.uniform(0.97, 1.03), 3)
+            eq = f"eq=gamma={gamma}:saturation={saturation}"
+
+            # === 像素级位移（放大 102% + 平移 2px）===
+            shift = random.choice([-2, 2])
+            scale = "scale=iw*1.02:ih*1.02"
+            crop = f"crop=iw:ih:{shift}:0"
+
+            vf = ",".join([setpts, eq, scale, crop])
+
+            args = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(input_file),
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-c:a",
+                "aac",
+                "-map_metadata",
+                "-1",
+                str(output_path),
+            ]
+
+            ok, err = self._run_ffmpeg(args)
+            if not ok:
+                return False, f"素材清洗失败: {err}"
+
+            return True, str(output_path)
+        except Exception as e:
+            return False, f"素材清洗异常: {e}"
+
     def process_video(
         self,
         input_path: str,

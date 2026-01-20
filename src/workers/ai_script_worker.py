@@ -45,6 +45,7 @@ class AIScriptWorker(BaseWorker):
         self,
         product_desc: str,
         role_prompt: str = "",
+        persona_key: str = "",
         model: str = "",
         max_attempts: int = 3,
         strict_validation: bool = True,
@@ -52,6 +53,7 @@ class AIScriptWorker(BaseWorker):
         super().__init__()
         self.product_desc = (product_desc or "").strip()
         self.role_prompt = (role_prompt or "").strip()
+        self.persona_key = (persona_key or "").strip().lower()
         self.model = (model or "").strip()
         self.max_attempts = max(1, int(max_attempts or 1))
         self.strict_validation = bool(strict_validation)
@@ -69,8 +71,15 @@ class AIScriptWorker(BaseWorker):
         base_url = ((getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com")
         use_model = self.model or (getattr(config, "AI_MODEL", "") or "deepseek-chat")
 
+        persona_prompt = ""
+        try:
+            persona_prompt = (getattr(config, "PERSONA_LIBRARY", {}) or {}).get(self.persona_key, "")
+        except Exception:
+            persona_prompt = ""
+
         extra_role = (
             self.role_prompt
+            or persona_prompt
             or (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
             or (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
         )
@@ -101,6 +110,8 @@ class AIScriptWorker(BaseWorker):
             system = (
                 "You are a TikTok short-form script writer. "
                 "Follow role/style constraints if provided. "
+                "Use short sentences, slang, and rhetorical questions. "
+                "Avoid phrases like 'Here is a product'. "
                 "Output plain text only."
             )
             if extra_role:
