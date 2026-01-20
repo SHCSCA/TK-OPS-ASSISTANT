@@ -188,6 +188,29 @@ def _env_float(name: str, default: float) -> float:
 		return default
 
 
+def _env_csv(name: str, default: list[str], upper: bool = False, lower: bool = False) -> list[str]:
+	"""读取逗号分隔配置并返回列表。
+
+	Args:
+		name: 环境变量名
+		default: 默认列表
+		upper: 是否统一转大写
+		lower: 是否统一转小写
+	"""
+	try:
+		text = _clean_env_value(os.getenv(name, ""))
+		if not text:
+			return default
+		items = [x.strip() for x in text.split(",") if x.strip()]
+		if upper:
+			items = [x.upper() for x in items]
+		if lower:
+			items = [x.lower() for x in items]
+		return items or default
+	except Exception:
+		return default
+
+
 # ===================================================
 # AI Token 成本估算配置
 # ===================================================
@@ -274,17 +297,51 @@ VIDEO_OUTPUT_SUFFIX = "_processed" # 处理后文件名的后缀
 IP_CHECK_ENABLED = os.getenv("IP_CHECK_ENABLED", "true").lower() == "true"
 IP_API_URL = "http://ip-api.com/json"  # 免费 IP 检测服务
 IP_API_TIMEOUT = 5  # 请求超时时间（秒）
+IP_CHECK_INTERVAL_SEC = _env_int("IP_CHECK_INTERVAL_SEC", 300)
+IP_SCAMALYTICS_MAX_SCORE = _env_int("IP_SCAMALYTICS_MAX_SCORE", 30)
+IPINFO_URL = _clean_env_value(os.getenv("IPINFO_URL", "https://ipinfo.io/json")) or "https://ipinfo.io/json"
+IPINFO_TOKEN = _clean_env_value(os.getenv("IPINFO_TOKEN", ""))
+IPINFO_ALLOWED_TYPES = _clean_env_value(os.getenv("IPINFO_ALLOWED_TYPES", "ISP,Residential"))
+IPINFO_BLOCKED_TYPES = _clean_env_value(os.getenv("IPINFO_BLOCKED_TYPES", "Hosting,Business"))
 
 
 # 需标记为风险的 ISP/机房关键词（用于诊断中心提醒）
-DANGEROUS_ISP_KEYWORDS = ["Google", "Amazon", "Microsoft", "Datacenter", "Cloud"]
+DANGEROUS_ISP_KEYWORDS = _env_csv(
+	"DANGEROUS_ISP_KEYWORDS",
+	["Google", "Amazon", "Microsoft", "Datacenter", "Cloud"],
+)
 
 # 允许的国家/地区代码（TikTok Shop 运营环境约束，默认仅 US）
-SAFE_COUNTRY_CODES = ["US"]
+SAFE_COUNTRY_CODES = _env_csv("SAFE_COUNTRY_CODES", ["US"], upper=True)
+
+# 当检测到高风险 IP 时，是否强制禁用左侧导航（默认 false，推荐保留为 false）
+IP_BLOCK_NAV_ON_RISK = os.getenv("IP_BLOCK_NAV_ON_RISK", "false").lower() == "true"
 
 # API 重试配置
 API_RETRY_COUNT = 3
 API_RETRY_DELAY = 2  # 秒；内部使用指数退避
+
+# ===================================================
+# V2.2 智能内容工厂配置
+# ===================================================
+PERSONA_LIBRARY = {
+	"bestie": "The Bestie (闺蜜)：OMG 你必须看这个...",
+	"skeptic": "The Skeptic (怀疑论者)：我以为是智商税，结果...",
+	"expert": "The Expert (专家)：商家不想让你知道的 3 个秘密...",
+}
+HEARTBEAT_SPEED_MIN = _env_float("HEARTBEAT_SPEED_MIN", 0.9)
+HEARTBEAT_SPEED_MAX = _env_float("HEARTBEAT_SPEED_MAX", 1.1)
+HEARTBEAT_PERIOD_SEC = _env_float("HEARTBEAT_PERIOD_SEC", 4.0)
+CYBORG_INTRO_SEC = _env_float("CYBORG_INTRO_SEC", 2.0)
+CYBORG_OUTRO_SEC = _env_float("CYBORG_OUTRO_SEC", 2.0)
+
+# ===================================================
+# 评论监控配置
+# ===================================================
+COMMENT_WATCH_KEYWORDS = _clean_env_value(os.getenv("COMMENT_WATCH_KEYWORDS", "want,need"))
+COMMENT_BLOCKLIST = _clean_env_value(os.getenv("COMMENT_BLOCKLIST", "fake,scam"))
+COMMENT_DM_ENABLED = (os.getenv("COMMENT_DM_ENABLED", "true").lower() == "true")
+COMMENT_DM_TEMPLATE = _clean_env_value(os.getenv("COMMENT_DM_TEMPLATE", "Thanks! I sent you the link in DM."))
 
 # UI 默认尺寸
 WINDOW_WIDTH = 1200
@@ -325,7 +382,10 @@ def reload_config() -> None:
 	global ARK_THINKING_TYPE
 	global TTS_PROVIDER, TTS_FALLBACK_PROVIDER, TTS_VOICE, TTS_SPEED
 	global VOLC_TTS_ENDPOINT, VOLC_TTS_APPID, VOLC_TTS_ACCESS_TOKEN, VOLC_TTS_SECRET_KEY, VOLC_TTS_TOKEN, VOLC_TTS_CLUSTER, VOLC_TTS_VOICE_TYPE, VOLC_TTS_ENCODING
-	global IP_CHECK_ENABLED
+	global IP_CHECK_ENABLED, IP_API_URL, IP_API_TIMEOUT
+	global IP_CHECK_INTERVAL_SEC, IP_SCAMALYTICS_MAX_SCORE
+	global IPINFO_URL, IPINFO_TOKEN, IPINFO_ALLOWED_TYPES, IPINFO_BLOCKED_TYPES
+	global DANGEROUS_ISP_KEYWORDS, SAFE_COUNTRY_CODES
 	global DOWNLOAD_DIR
 	global LOG_LEVEL, THEME_MODE
 	global VIDEO_DEEP_REMIX_ENABLED, VIDEO_REMIX_MICRO_ZOOM, VIDEO_REMIX_ADD_NOISE, VIDEO_REMIX_STRIP_METADATA
@@ -338,6 +398,10 @@ def reload_config() -> None:
 	global SUBTITLE_OUTLINE_AUTO, SUBTITLE_OUTLINE
 	global SUBTITLE_OUTLINE_MIN, SUBTITLE_OUTLINE_MAX
 	global SUBTITLE_SHADOW, SUBTITLE_MARGIN_V_RATIO, SUBTITLE_MARGIN_V_MIN, SUBTITLE_MARGIN_LR
+	global PERSONA_LIBRARY, HEARTBEAT_SPEED_MIN, HEARTBEAT_SPEED_MAX, HEARTBEAT_PERIOD_SEC
+	global CYBORG_INTRO_SEC, CYBORG_OUTRO_SEC
+	global COMMENT_WATCH_KEYWORDS, COMMENT_BLOCKLIST
+	global COMMENT_DM_ENABLED, COMMENT_DM_TEMPLATE
 
 	ECHOTIK_API_KEY = _clean_env_value(os.getenv("ECHOTIK_API_KEY", ""))
 	ECHOTIK_API_SECRET = _clean_env_value(os.getenv("ECHOTIK_API_SECRET", ""))
@@ -375,6 +439,19 @@ def reload_config() -> None:
 	THEME_MODE = _clean_env_value(os.getenv("THEME_MODE", "dark")) or "dark"
 
 	IP_CHECK_ENABLED = (os.getenv("IP_CHECK_ENABLED", "true").lower() == "true")
+	IP_API_URL = _clean_env_value(os.getenv("IP_API_URL", "http://ip-api.com/json")) or "http://ip-api.com/json"
+	IP_API_TIMEOUT = _env_int("IP_API_TIMEOUT", 5)
+	IP_CHECK_INTERVAL_SEC = _env_int("IP_CHECK_INTERVAL_SEC", 300)
+	IP_SCAMALYTICS_MAX_SCORE = _env_int("IP_SCAMALYTICS_MAX_SCORE", 30)
+	IPINFO_URL = _clean_env_value(os.getenv("IPINFO_URL", "https://ipinfo.io/json")) or "https://ipinfo.io/json"
+	IPINFO_TOKEN = _clean_env_value(os.getenv("IPINFO_TOKEN", ""))
+	IPINFO_ALLOWED_TYPES = _clean_env_value(os.getenv("IPINFO_ALLOWED_TYPES", "ISP,Residential"))
+	IPINFO_BLOCKED_TYPES = _clean_env_value(os.getenv("IPINFO_BLOCKED_TYPES", "Hosting,Business"))
+	DANGEROUS_ISP_KEYWORDS = _env_csv(
+		"DANGEROUS_ISP_KEYWORDS",
+		["Google", "Amazon", "Microsoft", "Datacenter", "Cloud"],
+	)
+	SAFE_COUNTRY_CODES = _env_csv("SAFE_COUNTRY_CODES", ["US"], upper=True)
 
 	download_dir_text = _clean_env_value(os.getenv("DOWNLOAD_DIR"))
 	# 默认下载目录：素材库下 Downloads（更贴合“素材统一归档”工作流）
@@ -413,6 +490,21 @@ def reload_config() -> None:
 	SUBTITLE_MARGIN_V_RATIO = _env_float("SUBTITLE_MARGIN_V_RATIO", 0.095)
 	SUBTITLE_MARGIN_V_MIN = _env_int("SUBTITLE_MARGIN_V_MIN", 60)
 	SUBTITLE_MARGIN_LR = _env_int("SUBTITLE_MARGIN_LR", 40)
+
+	PERSONA_LIBRARY = {
+		"bestie": "The Bestie (闺蜜)：OMG 你必须看这个...",
+		"skeptic": "The Skeptic (怀疑论者)：我以为是智商税，结果...",
+		"expert": "The Expert (专家)：商家不想让你知道的 3 个秘密...",
+	}
+	HEARTBEAT_SPEED_MIN = _env_float("HEARTBEAT_SPEED_MIN", 0.9)
+	HEARTBEAT_SPEED_MAX = _env_float("HEARTBEAT_SPEED_MAX", 1.1)
+	HEARTBEAT_PERIOD_SEC = _env_float("HEARTBEAT_PERIOD_SEC", 4.0)
+	CYBORG_INTRO_SEC = _env_float("CYBORG_INTRO_SEC", 2.0)
+	CYBORG_OUTRO_SEC = _env_float("CYBORG_OUTRO_SEC", 2.0)
+	COMMENT_WATCH_KEYWORDS = _clean_env_value(os.getenv("COMMENT_WATCH_KEYWORDS", "want,need"))
+	COMMENT_BLOCKLIST = _clean_env_value(os.getenv("COMMENT_BLOCKLIST", "fake,scam"))
+	COMMENT_DM_ENABLED = (os.getenv("COMMENT_DM_ENABLED", "true").lower() == "true")
+	COMMENT_DM_TEMPLATE = _clean_env_value(os.getenv("COMMENT_DM_TEMPLATE", "Thanks! I sent you the link in DM."))
 
 
 def get_config(key: str, default=None):
@@ -502,6 +594,16 @@ def sync_env_file() -> None:
 		"LAN_PORT": "8000",
 		"LAN_ENABLED": "false",
 		"IP_CHECK_ENABLED": "true",
+		"IP_API_URL": "http://ip-api.com/json",
+		"IP_API_TIMEOUT": "5",
+		"IP_CHECK_INTERVAL_SEC": "300",
+		"IP_SCAMALYTICS_MAX_SCORE": "30",
+		"IPINFO_URL": "https://ipinfo.io/json",
+		"IPINFO_TOKEN": "",
+		"IPINFO_ALLOWED_TYPES": "ISP,Residential",
+		"IPINFO_BLOCKED_TYPES": "Hosting,Business",
+		"DANGEROUS_ISP_KEYWORDS": "Google,Amazon,Microsoft,Datacenter,Cloud",
+		"SAFE_COUNTRY_CODES": "US",
 		# 选品阈值（给出默认值，便于用户在 .env 中直接调整）
 		"GROWTH_RATE_THRESHOLD": "500",
 		"MAX_REVIEWS": "50",
@@ -535,6 +637,16 @@ def sync_env_file() -> None:
 		"SUBTITLE_MARGIN_V_RATIO": "0.095",
 		"SUBTITLE_MARGIN_V_MIN": "60",
 		"SUBTITLE_MARGIN_LR": "40",
+		# V2.2: 人设/情绪曲线/评论监控
+		"HEARTBEAT_SPEED_MIN": "0.9",
+		"HEARTBEAT_SPEED_MAX": "1.1",
+		"HEARTBEAT_PERIOD_SEC": "4.0",
+		"CYBORG_INTRO_SEC": "2.0",
+		"CYBORG_OUTRO_SEC": "2.0",
+		"COMMENT_WATCH_KEYWORDS": "want,need",
+		"COMMENT_BLOCKLIST": "fake,scam",
+		"COMMENT_DM_ENABLED": "true",
+		"COMMENT_DM_TEMPLATE": "Thanks! I sent you the link in DM.",
 	}
 
 	for key, default_value in defaults.items():

@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QTimer
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
 from ui.profit_analysis import ProfitAnalysisWidget  # V2.0 替代蓝海监测
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TikTok 运营助手 v2.0 Pro")
+        self._ip_blocked = False
         
         # 允许自由拉伸，设定最小尺寸
         self.setMinimumSize(1200, 800)
@@ -105,6 +107,7 @@ class MainWindow(QMainWindow):
         
         self._init_ui()
         self._check_ip_status()
+        self._init_ip_timer()
         self.show()
     
     def _run_migrations(self):
@@ -256,9 +259,50 @@ class MainWindow(QMainWindow):
         is_safe, msg = check_ip_safety()
         self.ip_status_label.setText(f"当前网络: {msg}")
         self._set_ip_status_variant(is_safe)
+        try:
+            if not is_safe:
+                self._block_on_ip_risk(msg)
+            else:
+                self._recover_from_ip_risk()
+        except Exception:
+            pass
         
         # Also refresh panel
         self.ip_panel.refresh_status()
+
+    def _init_ip_timer(self) -> None:
+        """每 5 分钟自动检测一次 IP 环境。"""
+        try:
+            interval_sec = int(getattr(config, "IP_CHECK_INTERVAL_SEC", 300) or 300)
+        except Exception:
+            interval_sec = 300
+        self._ip_timer = QTimer(self)
+        self._ip_timer.setInterval(max(60, interval_sec) * 1000)
+        self._ip_timer.timeout.connect(self._check_ip_status)
+        self._ip_timer.start()
+
+    def _block_on_ip_risk(self, msg: str) -> None:
+        """当 IP 风险触发时，软熔断并提示用户切断网络。"""
+        if self._ip_blocked:
+            return
+        self._ip_blocked = True
+        try:
+            # 仅在配置允许时才强制禁用导航（默认不禁用，避免阻塞用户）
+            if getattr(config, "IP_BLOCK_NAV_ON_RISK", False):
+                self.nav_list.setEnabled(False)
+        except Exception:
+            pass
+        QMessageBox.critical(self, "IP 风险", f"检测到高风险网络环境：\n{msg}\n\n请立刻切换/断开网络后重试。")
+
+    def _recover_from_ip_risk(self) -> None:
+        """IP 恢复后解除软熔断。"""
+        if not self._ip_blocked:
+            return
+        self._ip_blocked = False
+        try:
+            self.nav_list.setEnabled(True)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """Handle window close"""
