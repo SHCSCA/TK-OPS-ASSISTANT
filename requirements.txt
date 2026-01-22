@@ -32,6 +32,10 @@ pyperclip>=1.8.2
 # V2.0 New Dependencies
 qrcode[pil]==7.4.2      # 二维码生成（局域网传输）
 edge-tts==6.1.9         # 免费TTS语音合成
+qt-material==2.14       # 现代化主题
+
+# V3.0 Real Actions
+playwright==1.40.0      # 浏览器自动化
 
 # Testing
 pytest==7.4.0

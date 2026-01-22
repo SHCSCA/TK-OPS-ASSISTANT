@@ -4,7 +4,7 @@ Material Factory (Video Processing) UI Panel
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QCheckBox, QTextEdit, QProgressBar, QFrame, QFileDialog,
-    QSpinBox, QDoubleSpinBox
+    QSpinBox, QDoubleSpinBox, QLineEdit
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QDragEnterEvent, QDropEvent
@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 import config
 from utils.ui_log import append_log, install_log_context_menu
+from ui.toast import Toast
 
 
 class MaterialFactoryPanel(QWidget):
@@ -21,6 +22,7 @@ class MaterialFactoryPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.cyborg_worker = None
         self.video_files = []
         self.output_dir = None  # User selected output directory
         self.output_dir_custom = False
@@ -74,6 +76,8 @@ class MaterialFactoryPanel(QWidget):
         # Add class/object name for styling if needed
         options_frame.setProperty("class", "config-frame")
         layout.addWidget(options_frame)
+
+        # [REMOVED] 半人马拼接 (Moved to AI Content Factory)
         
         # Control buttons
         control_layout = QHBoxLayout()
@@ -170,7 +174,7 @@ class MaterialFactoryPanel(QWidget):
         
         row_out = QHBoxLayout()
         self.output_dir_label = QLabel(f"默认：{default_base}")
-        self.output_dir_label.setStyleSheet("color: #888; font-style: italic;")
+        self._set_output_dir_label_variant("path-muted")
         self.output_dir_label.setWordWrap(True) # Allow long paths to wrap or just truncate visually
         row_out.addWidget(self.output_dir_label)
         
@@ -224,7 +228,7 @@ class MaterialFactoryPanel(QWidget):
             self.output_dir = d
             self.output_dir_custom = True
             self.output_dir_label.setText(d)
-            self.output_dir_label.setStyleSheet("color: white;")
+            self._set_output_dir_label_variant("")
             append_log(self.log_text, f"输出目录已设置为: {d}")
         else:
             # User cancelled, keep previous or default
@@ -285,7 +289,7 @@ class MaterialFactoryPanel(QWidget):
             self.output_dir = self._build_default_output_dir()
             self.output_dir_custom = False
             self.output_dir_label.setText(self.output_dir)
-            self.output_dir_label.setStyleSheet("color: white;")
+            self._set_output_dir_label_variant("")
             append_log(self.log_text, f"输出目录（默认）: {self.output_dir}")
 
         # Create and start worker
@@ -307,11 +311,83 @@ class MaterialFactoryPanel(QWidget):
         self.worker.error_signal.connect(self._on_error)
         self.worker.finished_signal.connect(self._on_finished)
         self.worker.start()
+
+    def _pick_cyborg_intro(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择片头原创", "", "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
+        )
+        if file_path:
+            self.cyborg_intro_input.setText(file_path)
+
+    def _pick_cyborg_mid(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择中段混剪", "", "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
+        )
+        if file_path:
+            self.cyborg_mid_input.setText(file_path)
+
+    def _pick_cyborg_outro(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择片尾原创", "", "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
+        )
+        if file_path:
+            self.cyborg_outro_input.setText(file_path)
+
+    def _run_cyborg_compose(self):
+        """执行半人马拼接。"""
+        if self.cyborg_worker:
+            append_log(self.log_text, "半人马拼接进行中，请稍候", level="WARNING")
+            return
+        intro = (self.cyborg_intro_input.text() or "").strip()
+        mid = (self.cyborg_mid_input.text() or "").strip()
+        outro = (self.cyborg_outro_input.text() or "").strip()
+        if not intro or not mid or not outro:
+            append_log(self.log_text, "请先选择片头/中段/片尾视频", level="ERROR")
+            return
+
+        if not self.output_dir or not self.output_dir_custom:
+            self.output_dir = self._build_default_output_dir()
+            self.output_dir_custom = False
+            self.output_dir_label.setText(self.output_dir)
+            self._set_output_dir_label_variant("")
+
+        self.progress_bar.setValue(0)
+        self.cyborg_run_btn.setEnabled(False)
+        self.cyborg_worker = CyborgComposeWorker(
+            intro_path=intro,
+            mid_path=mid,
+            outro_path=outro,
+            output_dir=self.output_dir,
+        )
+        self.cyborg_worker.log_signal.connect(self._on_log)
+        self.cyborg_worker.progress_signal.connect(self._on_progress)
+        self.cyborg_worker.done_signal.connect(self._on_cyborg_done)
+        self.cyborg_worker.start()
+
+    def _on_cyborg_done(self, ok: bool, message: str) -> None:
+        try:
+            if ok:
+                msg = message or "半人马拼接完成"
+                append_log(self.log_text, msg)
+                Toast.show_success(self.window(), msg)
+            else:
+                msg = message or "半人马拼接失败"
+                append_log(self.log_text, msg, level="ERROR")
+                Toast.show_error(self.window(), msg)
+        except Exception:
+            pass
+        self.cyborg_run_btn.setEnabled(True)
+        self.cyborg_worker = None
     
     def stop_processing(self):
         """Stop processing"""
         if self.worker:
             self.worker.stop()
+        if self.cyborg_worker:
+            try:
+                self.cyborg_worker.stop()
+            except Exception:
+                pass
         self.stop_button.setEnabled(False)
         self.start_button.setEnabled(True)
     
@@ -326,10 +402,13 @@ class MaterialFactoryPanel(QWidget):
     def _on_error(self, error_message: str):
         """Handle error signal"""
         append_log(self.log_text, error_message, level="ERROR")
-    
+        Toast.show_error(self.window(), "任务执行出错")
+
     def _on_finished(self):
         """Handle finished signal"""
         self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        Toast.show_success(self.window(), "批量处理任务已完成")
         self.stop_button.setEnabled(False)
         append_log(self.log_text, "处理完成!", level="INFO")
         self.worker = None
@@ -337,13 +416,15 @@ class MaterialFactoryPanel(QWidget):
             default_base = getattr(config, "PROCESSED_VIDEOS_DIR", config.OUTPUT_DIR)
             self.output_dir = None
             self.output_dir_label.setText(f"默认：{default_base}")
-            self.output_dir_label.setStyleSheet("color: #888; font-style: italic;")
+            self._set_output_dir_label_variant("path-muted")
 
     def shutdown(self):
         """窗口关闭时的资源清理。"""
         try:
             if self.worker:
                 self.worker.stop()
+            if self.cyborg_worker:
+                self.cyborg_worker.stop()
         except Exception:
             pass
 
@@ -358,6 +439,15 @@ class MaterialFactoryPanel(QWidget):
         except Exception:
             pass
         return str(target)
+
+    def _set_output_dir_label_variant(self, variant: str) -> None:
+        """统一设置输出目录标签样式（使用全局主题变体）。"""
+        try:
+            self.output_dir_label.setProperty("variant", variant)
+            self.output_dir_label.style().unpolish(self.output_dir_label)
+            self.output_dir_label.style().polish(self.output_dir_label)
+        except Exception:
+            pass
     
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter"""

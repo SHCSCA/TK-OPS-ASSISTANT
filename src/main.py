@@ -53,7 +53,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 # 引入日志管理器和全局样式
 from utils.logger import LoggerManager, logger
 import config
-from utils.styles import get_global_stylesheet
+from utils.styles import apply_global_theme
 
 # [已移除] 显式导入 PyQt5.sip 可能导致 PyInstaller 环境下出现 "cannot load module more than once" 错误
 # PyInstaller 的 hook-PyQt5 通常能自动处理 sip 依赖
@@ -137,9 +137,9 @@ def main():
 
     app = QApplication(sys.argv)
     
-    # 设置全局样式表
-    app.setStyle('Fusion')  # 使用 Fusion 作为基础样式
-    app.setStyleSheet(get_global_stylesheet(getattr(config, "THEME_MODE", "dark")))  # 应用自定义 QSS
+    # 设置全局样式表（统一入口，避免局部 setStyleSheet 覆盖主题）
+    theme_mode = getattr(config, "THEME_MODE", "dark")
+    apply_global_theme(app, theme_mode)
 
     # 启动时配置缺失提示（中文）
     try:

@@ -80,7 +80,10 @@ class AssetLibrary:
                   source_url: str = None,
                   source_type: str = "user_upload",
                   tags: List[str] = None,
-                  metadata: Dict[str, Any] = None) -> bool:
+                  metadata: Dict[str, Any] = None,
+                  type_tag: str = "",
+                  emotion_tag: str = "",
+                  object_tag: str = "") -> bool:
         """添加素材到库"""
         try:
             file_path_obj = Path(file_path)
@@ -91,8 +94,8 @@ class AssetLibrary:
 
                 c.execute('''
                 INSERT OR REPLACE INTO assets 
-                (asset_id, type, title, file_path, file_size, source_url, source_type, tags, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (asset_id, type, title, file_path, file_size, source_url, source_type, tags, metadata, type_tag, emotion_tag, object_tag, last_used_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(last_used_at, CURRENT_TIMESTAMP))
                 ''', (
                     asset_id,
                     file_type,
@@ -102,7 +105,10 @@ class AssetLibrary:
                     source_url,
                     source_type,
                     json.dumps(tags or []),
-                    json.dumps(metadata or {})
+                    json.dumps(metadata or {}),
+                    (type_tag or "").strip(),
+                    (emotion_tag or "").strip(),
+                    (object_tag or "").strip(),
                 ))
 
                 conn.commit()
@@ -110,6 +116,37 @@ class AssetLibrary:
         except Exception as e:
             logger.error(f"添加素材失败: {e}")
             return False
+
+    def select_asset_by_tags(self, type_tag: str, emotion_tag: str, object_tag: str) -> Optional[Dict[str, Any]]:
+        """按标签选择最少使用的素材（避免重复）。"""
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                c = conn.cursor()
+                c.execute(
+                    """
+                    SELECT * FROM assets
+                    WHERE status = 'active'
+                      AND type_tag = ? AND emotion_tag = ? AND object_tag = ?
+                    ORDER BY last_used_at ASC
+                    LIMIT 1
+                    """,
+                    ((type_tag or "").strip(), (emotion_tag or "").strip(), (object_tag or "").strip()),
+                )
+                row = c.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["tags"] = json.loads(d.get("tags", "[]"))
+                d["metadata"] = json.loads(d.get("metadata", "{}"))
+
+                # 更新使用时间
+                c.execute("UPDATE assets SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", (d.get("id"),))
+                conn.commit()
+                return d
+        except Exception as e:
+            logger.error(f"按标签选取素材失败: {e}")
+            return None
     
     def log_processing(self,
                       asset_id: str,

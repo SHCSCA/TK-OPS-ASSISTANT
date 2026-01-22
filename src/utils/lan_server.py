@@ -24,6 +24,7 @@ class LanDropServer:
         self.httpd = None
         self.thread = None
         self.running = False
+        self._last_ip_switch_ts = 0.0
 
     def get_local_ip(self):
         """获取本机局域网 IP"""
@@ -82,6 +83,25 @@ class LanDropServer:
         
         self.running = False
         logger.info("[SERVER] 局域网服务已停止")
+
+    def can_switch_ip(self, min_interval_sec: int = 30) -> bool:
+        """检查是否允许切换 IP（熔断机制）。"""
+        try:
+            import time
+            now = time.time()
+            if now - float(self._last_ip_switch_ts or 0) < float(min_interval_sec):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def record_ip_switch(self) -> None:
+        """记录一次 IP 切换时间。"""
+        try:
+            import time
+            self._last_ip_switch_ts = time.time()
+        except Exception:
+            pass
 
     def get_url(self):
         """返回访问地址"""

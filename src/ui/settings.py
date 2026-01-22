@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt
 from api.echotik_api import EchoTikApiClient
 import config
 from pathlib import Path
-from utils.styles import get_global_stylesheet
+from utils.styles import apply_global_theme
 
 
 def _norm_provider(text: str) -> str:
@@ -972,7 +972,7 @@ class SettingsPanel(QWidget):
             try:
                 app = QApplication.instance()
                 if app:
-                    app.setStyleSheet(get_global_stylesheet(getattr(config, "THEME_MODE", "dark")))
+                    apply_global_theme(app, getattr(config, "THEME_MODE", "dark"))
             except Exception:
                 pass
             

@@ -17,8 +17,10 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QMessageBox,
     QSizePolicy,
+    QFrame,
 )
 from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QIcon
 from datetime import datetime
 import sqlite3
@@ -26,6 +28,7 @@ import logging
 from pathlib import Path
 
 import config
+from api.ai_assistant import analyze_comment_lead
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +63,9 @@ class AccountItemWidget(QWidget):
         # 状态指示器
         self.lbl_status = QLabel()
         self.lbl_status.setFixedSize(14, 14)
-        self.lbl_status.setStyleSheet(
-            f"background-color: {self.get_status_color()}; "
-            f"border-radius: 7px; border: 2px solid #1a1a1a;"
-        )
+        # 使用全局主题：通过动态属性驱动颜色
+        self.lbl_status.setProperty("role", "status-dot")
+        self._apply_status_dot()
         
         # 账号信息（拆分字段，避免“全挤在一行”）
         info_layout = QVBoxLayout()
@@ -113,14 +115,17 @@ class AccountItemWidget(QWidget):
         layout.addStretch()
         layout.addWidget(self.btn_checkin)
         
-    def get_status_color(self):
-        """根据状态返回颜色"""
+    def _apply_status_dot(self) -> None:
+        """根据账号状态刷新圆点颜色（走全局 QSS）。"""
         status = self.account.get('status', 'active')
-        if status == 'active':
-            return '#00e676'   # 绿色
-        elif status == 'shadowban':
-            return '#ffca28'   # 黄色
-        return '#757575'       # 灰色 (suspended)
+        try:
+            self.lbl_status.setProperty("state", status)
+            # 避免在初始化时频繁 polish 导致问题，利用 Qt 自动机制
+            if self.lbl_status.isVisible():
+                self.lbl_status.style().unpolish(self.lbl_status)
+                self.lbl_status.style().polish(self.lbl_status)
+        except Exception:
+            pass
 
     def on_checkin(self):
         """打卡操作"""
@@ -228,7 +233,8 @@ class CRMWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.init_ui()
-        self.load_accounts()
+        # 延迟加载数据，避免阻塞主界面启动
+        QTimer.singleShot(100, self.load_accounts)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -280,14 +286,22 @@ class CRMWidget(QWidget):
         layout.addLayout(title_bar)
         layout.addWidget(self.list_widget)
 
+        # 评论监控面板与私信任务面板已移除，迁移至【互动/获客中心】
+
     def load_accounts(self):
         """从数据库加载账号列表"""
-        self.list_widget.clear()
-        
         try:
             dbp = _db_path()
             logger.info(f"[CRM] 使用数据库：{dbp}")
-            with sqlite3.connect(dbp) as conn:
+            
+            if not Path(dbp).exists():
+                logger.warning(f"[CRM] 数据库文件不存在: {dbp}")
+                return
+
+            logger.info("[CRM] 正在连接数据库(设置超时5秒)...")
+            # 增加 timeout 参数，防止死锁无限等待
+            with sqlite3.connect(dbp, timeout=5.0) as conn:
+                logger.info("[CRM] API: 连接建立，准备查询...")
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -297,7 +311,9 @@ class CRMWidget(QWidget):
                     """
                 )
                 accounts = cursor.fetchall()
+                logger.info(f"[CRM] 查询成功，获取到 {len(accounts)} 个账号")
             
+            self.list_widget.clear()
             if not accounts:
                 # 显示空状态提示
                 item = QListWidgetItem("暂无账号，点击右上角【添加账号】开始管理")
@@ -305,7 +321,10 @@ class CRMWidget(QWidget):
                 self.list_widget.addItem(item)
                 return
             
-            for acc_data in accounts:
+            logger.info("[CRM] 正在渲染列表...")
+            # self.list_widget.setUpdatesEnabled(False) # 移除去除优化，排查卡顿
+            for i, acc_data in enumerate(accounts):
+                # logger.debug(f"[CRM] 渲染第 {i+1} 个账号") 
                 acc_dict = {
                     'id': acc_data[0],
                     'username': acc_data[1],
@@ -320,12 +339,184 @@ class CRMWidget(QWidget):
                 item.setData(Qt.UserRole, int(acc_dict["id"]))
                 widget = AccountItemWidget(acc_dict, self)
                 self.list_widget.setItemWidget(item, widget)
+            # self.list_widget.setUpdatesEnabled(True)
+            logger.info("[CRM] 列表渲染完成")
 
             self._on_selection_changed()
+            logger.info("[CRM] load_accounts 函数执行结束")
                 
         except Exception as e:
             logger.error(f"加载账号失败: {e}")
-            QMessageBox.critical(self, "加载失败", f"无法加载账号列表:\n{e}")
+            # QMessageBox.critical(self, "加载失败", f"无法加载账号列表:\n{e}")
+
+    def _init_comment_monitor(self) -> None:
+        """初始化评论监控定时器。"""
+        self._comment_timer = QTimer(self)
+        self._comment_timer.setInterval(5000)
+        self._comment_timer.timeout.connect(self._poll_comments)
+        self._load_dm_tasks()
+
+    def _toggle_comment_monitor(self) -> None:
+        """开关评论监控。"""
+        if self._comment_timer.isActive():
+            self._comment_timer.stop()
+            self.comment_toggle_btn.setText("开始监控")
+        else:
+            self._comment_timer.start()
+            self.comment_toggle_btn.setText("监控中...")
+
+    def _poll_comments(self) -> None:
+        """轮询最新评论并进行意向分级。"""
+        try:
+            dbp = _db_path()
+            with sqlite3.connect(dbp) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, author, content, created_at
+                    FROM comments
+                    WHERE id > ?
+                    ORDER BY id ASC
+                    LIMIT 50
+                    """,
+                    (self._last_comment_id,)
+                )
+                rows = cursor.fetchall()
+
+            if not rows:
+                return
+
+            for row in rows:
+                cid, author, content, created_at = row
+                analysis = analyze_comment_lead(content or "")
+                lead_tier = int(analysis.get("lead_tier", 3))
+                reply = str(analysis.get("reply", "") or "")
+
+                self._update_comment_tier(cid, lead_tier)
+                self._append_comment_alert(author, content, created_at, lead_tier, reply)
+                if lead_tier == 1:
+                    self._enqueue_dm_task(cid, reply)
+                self._last_comment_id = max(self._last_comment_id, int(cid))
+        except Exception as e:
+            logger.error(f"评论监控失败: {e}")
+
+    def _update_comment_tier(self, comment_id: int, lead_tier: int) -> None:
+        """更新评论意向等级。"""
+        try:
+            dbp = _db_path()
+            with sqlite3.connect(dbp) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE comments SET lead_tier = ? WHERE id = ?",
+                    (int(lead_tier), int(comment_id)),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def _append_comment_alert(self, author: str, content: str, created_at: str, lead_tier: int, reply: str = "") -> None:
+        """将评论追加到监控列表。"""
+        try:
+            tag = "T1" if lead_tier == 1 else "T2" if lead_tier == 2 else "T3"
+            display = f"[{tag}] {author or '未知'}：{content} ({created_at})"
+            if reply:
+                display += f" | 回复建议：{reply}"
+            item = QListWidgetItem(display)
+            if lead_tier == 1:
+                item.setForeground(Qt.red)
+            elif lead_tier == 2:
+                item.setForeground(Qt.darkYellow)
+            self.comment_list.insertItem(0, item)
+        except Exception:
+            pass
+
+    def _enqueue_dm_task(self, comment_id: int, reply: str = "") -> None:
+        """创建私信任务（仅高意向）。"""
+        try:
+            if not bool(getattr(config, "COMMENT_DM_ENABLED", True)):
+                return
+            dbp = _db_path()
+            with sqlite3.connect(dbp) as conn:
+                cursor = conn.cursor()
+                self._ensure_dm_tasks_table(cursor)
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO dm_tasks (comment_id, status, message)
+                    VALUES (?, 'pending', ?)
+                    """,
+                    (int(comment_id), (reply or getattr(config, "COMMENT_DM_TEMPLATE", "")).strip()),
+                )
+                conn.commit()
+            self._load_dm_tasks()
+        except Exception as e:
+            logger.error(f"创建私信任务失败: {e}")
+
+    def _load_dm_tasks(self) -> None:
+        """加载私信任务列表。"""
+        try:
+            self.dm_list.clear()
+            dbp = _db_path()
+            with sqlite3.connect(dbp) as conn:
+                cursor = conn.cursor()
+                self._ensure_dm_tasks_table(cursor)
+                cursor.execute(
+                    """
+                    SELECT id, comment_id, status, message, created_at
+                    FROM dm_tasks
+                    ORDER BY created_at DESC
+                    LIMIT 100
+                    """
+                )
+                rows = cursor.fetchall()
+
+            for row in rows:
+                tid, cid, status, message, created_at = row
+                item = QListWidgetItem(f"#{tid} | 评论ID:{cid} | {status} | {message} | {created_at}")
+                item.setData(Qt.UserRole, int(tid))
+                if status == "pending":
+                    item.setForeground(Qt.red)
+                self.dm_list.addItem(item)
+        except Exception as e:
+            logger.error(f"加载私信任务失败: {e}")
+
+    def _mark_dm_done(self) -> None:
+        """标记选中私信任务为已处理。"""
+        try:
+            item = self.dm_list.currentItem()
+            if not item:
+                return
+            task_id = item.data(Qt.UserRole)
+            dbp = _db_path()
+            with sqlite3.connect(dbp) as conn:
+                cursor = conn.cursor()
+                self._ensure_dm_tasks_table(cursor)
+                cursor.execute(
+                    "UPDATE dm_tasks SET status='done', handled_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (int(task_id),),
+                )
+                conn.commit()
+            self._load_dm_tasks()
+        except Exception as e:
+            logger.error(f"更新私信任务失败: {e}")
+
+    def _ensure_dm_tasks_table(self, cursor) -> None:
+        """保证私信任务表存在（防止迁移未执行导致 UI 异常）。"""
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dm_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    comment_id INTEGER UNIQUE,
+                    status TEXT DEFAULT 'pending',
+                    message TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    handled_at DATETIME
+                )
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dm_tasks_status ON dm_tasks(status)")
+        except Exception:
+            pass
 
     def add_account_dialog(self):
         """打开添加账号对话框"""

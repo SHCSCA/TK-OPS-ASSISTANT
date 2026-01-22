@@ -11,16 +11,18 @@
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QStatusBar,
-    QStackedWidget, QFrame
+    QStackedWidget, QFrame, QMessageBox
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QTimer
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
+from ui.dashboard import DashboardPanel
 from ui.profit_analysis import ProfitAnalysisWidget  # V2.0 替代蓝海监测
 from ui.material_factory import MaterialFactoryPanel
 from ui.crm import CRMWidget  # V2.0 新增
+from ui.engagement import EngagementPanel  # V2.0 新增
 from ui.downloader import DownloaderPanel
 from ui.ai_content_factory import AIContentFactoryPanel, PhotoVideoPanel
 from ui.visual_lab import VisualLabPanel
@@ -28,63 +30,6 @@ from ui.diagnostics import DiagnosticsPanel
 from ui.settings import SettingsPanel
 from ui.lan_airdrop import LanAirdropPanel
 from utils.lan_server import get_lan_server  # V2.0 新增
-
-
-class IPStatusPanel(QWidget):
-    """独立的 IP 状态展示面板"""
-    def __init__(self):
-        super().__init__()
-        self._init_ui()
-
-    def _set_status_variant(self, is_safe: bool) -> None:
-        """用动态属性驱动样式，避免局部 setStyleSheet 破坏全局主题。"""
-        self.status_label.setProperty("status", "safe" if is_safe else "unsafe")
-        # 触发 QSS 重新应用
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
-
-    def _init_ui(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(20)
-
-        # Title
-        title = QLabel("IP 环境监测")
-        title.setObjectName("h1")
-        layout.addWidget(title)
-
-        # Status info container
-        self.status_container = QFrame()
-        self.status_container.setProperty("class", "config-frame")
-        container_layout = QVBoxLayout(self.status_container)
-        container_layout.setContentsMargins(30, 30, 30, 30)
-
-        self.status_label = QLabel("正在检测...")
-        self.status_label.setObjectName("h2")
-        self.status_label.setWordWrap(True)
-        container_layout.addWidget(self.status_label)
-
-        layout.addWidget(self.status_container)
-
-        # Info text
-        info_text = QLabel(
-            "提示：\n1. 此工具建议在美国本地网络环境下运行。\n"
-            "2. 如检测到非美区或机房IP (Datacenter)，可能会影响 TikTok 流量。\n"
-            "3. 绿色状态表示环境相对安全。"
-        )
-        info_text.setProperty("variant", "muted")
-        layout.addWidget(info_text)
-
-        layout.addStretch()
-        self.setLayout(layout)
-
-    def refresh_status(self):
-        """刷新状态显示"""
-        is_safe, status_message = check_ip_safety()
-        icon = "✅" if is_safe else "⚠️"
-        
-        self.status_label.setText(f"{icon} {status_message}")
-        self._set_status_variant(is_safe)
 
 
 class MainWindow(QMainWindow):
@@ -139,15 +84,17 @@ class MainWindow(QMainWindow):
         self._init_content_stack()
         self._init_status_bar()
 
-        # 默认选中第一个导航项
-        self.nav_list.setCurrentRow(0)
+        # 默认选中第一个可操作的导航项 (跳过标题)
+        default_row = getattr(self, "first_selectable_row", 1)
+        self.nav_list.setCurrentRow(default_row)
 
     def _init_content_stack(self) -> None:
         """初始化右侧内容栈，顺序需与导航同步"""
-        self.ip_panel = IPStatusPanel()
+        self.dashboard_panel = DashboardPanel(parent_nav_callback=self._switch_via_dashboard)
         self.profit_panel = ProfitAnalysisWidget()  # V2.0 替代蓝海监测
         self.material_factory_panel = MaterialFactoryPanel()
         self.crm_panel = CRMWidget()  # V2.0 新增
+        self.engagement_panel = EngagementPanel() # V2.0 新增
         self.downloader_panel = DownloaderPanel()
         self.ai_content_factory_panel = AIContentFactoryPanel(enable_photo=False)
         self.photo_video_panel = PhotoVideoPanel()
@@ -157,10 +104,11 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel()
 
         for panel in [
-            self.ip_panel,
+            self.dashboard_panel,
             self.profit_panel,
             self.material_factory_panel,
             self.crm_panel,
+            self.engagement_panel,  # Integrated EngagementPanel
             self.downloader_panel,
             self.ai_content_factory_panel,
             self.photo_video_panel,
@@ -170,6 +118,15 @@ class MainWindow(QMainWindow):
             self.settings_panel,
         ]:
             self.stacked_widget.addWidget(panel)
+            
+    def _switch_via_dashboard(self, index: int):
+        """Callback for dashboard quick actions"""
+        # Find item with this UserRole and select it
+        for i in range(self.nav_list.count()):
+            item = self.nav_list.item(i)
+            if item.data(Qt.UserRole) == index:
+                self.nav_list.setCurrentRow(i)
+                break
 
     def _create_left_panel(self) -> QWidget:
         panel = QFrame()
@@ -201,24 +158,64 @@ class MainWindow(QMainWindow):
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("NavList")
 
-        nav_items = [
-            "🛡  IP 安全体检",
-            "💰  选品清洗池",
-            "🎬  素材工厂",
-            "👥  账号矩阵",
-            "⬇️  素材下载器",
-            "🧠  AI 二创工厂",
-            "🖼️  图文成片",
-            "👁️  视觉实验室",
-            "📡  局域网空投",
-            "🧪  诊断中心",
-            "⚙️  系统设置",
+        # Structure: (Header, [(Title, StackIndex), ...])
+        nav_structure = [
+            ("🚀 核心功能", [
+                ("�  工作台", 0),
+                ("👥  账号矩阵", 3),
+                ("💬  互动中心", 4),
+            ]),
+            ("🎨 内容创作", [
+                ("🎬  素材工厂", 2),
+                ("🧠  AI 二创工厂", 6),
+                ("🖼️  图文成片", 7),
+                ("👁️  视觉实验室", 8),
+            ]),
+            ("💼 电商运营", [
+                ("💰  选品清洗池", 1),
+            ]),
+            ("🛠️ 实用工具", [
+                ("⬇️  素材下载器", 5),
+                ("📡  局域网空投", 9),
+            ]),
+            ("🔧 系统管理", [
+                ("🧪  诊断中心", 10),
+                ("⚙️  系统设置", 11),
+            ])
         ]
 
-        for name in nav_items:
-            item = QListWidgetItem(name)
-            item.setFont(QFont("Microsoft YaHei UI", 10))
-            self.nav_list.addItem(item)
+        self.first_selectable_row = 0
+        current_row = 0
+        first_found = False
+
+        for group_title, items in nav_structure:
+            # Add Header
+            header = QListWidgetItem(group_title)
+            # 标题不可选中
+            header.setFlags(Qt.NoItemFlags)
+            header.setData(Qt.UserRole, -1)
+            
+            font = QFont()
+            font.setBold(True)
+            font.setPointSize(9)
+            header.setFont(font)
+            # 简单的视觉区分，更复杂的样式建议在 QSS 中针对 UserRole=-1 或 disabled 状态设置
+            header.setForeground(Qt.gray)
+            
+            self.nav_list.addItem(header)
+            current_row += 1
+
+            for title, page_idx in items:
+                item = QListWidgetItem(title)
+                item.setFont(QFont("Microsoft YaHei UI", 10))
+                item.setData(Qt.UserRole, page_idx)
+                self.nav_list.addItem(item)
+                
+                if not first_found:
+                    self.first_selectable_row = current_row
+                    first_found = True
+                
+                current_row += 1
             
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
         layout.addWidget(self.nav_list)
@@ -240,25 +237,40 @@ class MainWindow(QMainWindow):
         self.ip_status_label.style().unpolish(self.ip_status_label)
         self.ip_status_label.style().polish(self.ip_status_label)
 
-    def _on_nav_changed(self, index):
-        """Switch stacked widget page"""
+    def _on_nav_changed(self, row):
+        """Switch stacked widget page based on item data"""
+        item = self.nav_list.item(row)
+        if not item:
+            return
+
+        page_idx = item.data(Qt.UserRole)
+        # 标题项 UserRole 为 -1，忽略
+        if page_idx is None or int(page_idx) == -1:
+            return
+            
+        index = int(page_idx)
         self.stacked_widget.setCurrentIndex(index)
         
-        # Special refresh for IP panel
-        if index == 0:
-            self.ip_panel.refresh_status()
+        # Dashboard auto refresh happens on init, but we could trigger it again
+        if index == 0 and hasattr(self.dashboard_panel, "_refresh_ip_status"):
+             # self.dashboard_panel._refresh_ip_status() # Optional: auto refresh whenever creating
+             pass
 
         # 局域网空投：每次进入刷新目录/二维码
         try:
-            if getattr(self, "lan_airdrop_panel", None) and index == self.stacked_widget.indexOf(self.lan_airdrop_panel):
+            if getattr(self, "lan_airdrop_panel", None) and index == 8:
                 self.lan_airdrop_panel.refresh()
         except Exception:
             pass
 
     def _check_ip_status(self):
         is_safe, msg = check_ip_safety()
-        self.ip_status_label.setText(f"当前网络: {msg}")
-        self._set_ip_status_variant(is_safe)
+        try:
+            self.ip_status_label.setText(f"当前网络: {msg}")
+            self._set_ip_status_variant(is_safe)
+        except Exception:
+            pass
+
         try:
             if not is_safe:
                 self._block_on_ip_risk(msg)
@@ -267,8 +279,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # Also refresh panel
-        self.ip_panel.refresh_status()
+        # If dashboard exists, maybe refresh it too
+        if hasattr(self, "dashboard_panel") and hasattr(self.dashboard_panel, "_refresh_ip_status"):
+             # Optional: sync dashboard card
+             pass
 
     def _init_ip_timer(self) -> None:
         """每 5 分钟自动检测一次 IP 环境。"""

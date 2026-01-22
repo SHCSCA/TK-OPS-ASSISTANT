@@ -50,8 +50,9 @@ class DiagnosticsPanel(QWidget):
         layout.addWidget(tip)
 
         frame = QFrame()
-        frame.setProperty("class", "config-frame")
+        frame.setProperty("class", "card")
         frame_layout = QHBoxLayout(frame)
+        frame_layout.setContentsMargins(20, 20, 20, 20)
 
         self.start_button = QPushButton("开始诊断")
         self.start_button.clicked.connect(self.start_diagnostics)

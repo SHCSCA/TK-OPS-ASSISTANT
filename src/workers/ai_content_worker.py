@@ -470,72 +470,120 @@ Output ONLY the script text, no formatting.
             return ""
 
     def mix_audio_video(self, audio_path: str, subtitle_srt_path: str = ""):
-        """使用 MoviePy 混合音视频（原声 2% + 合成配音），并可选烧录字幕。"""
+        """
+        Riley Goodside 重构版：
+        使用 FFmpeg Filter Complex 实现【单次编码】完成：
+        1. 视频自动循环补齐音频时长
+        2. 原声压低 + TTS 混合
+        3. 字幕烧录
+        4. 极速渲染
+        """
         try:
-            # 懒加载 moviepy (Upgrade to 2.0+)
-            from moviepy import VideoFileClip, AudioFileClip, CompositeAudioClip, vfx
-
-            video = VideoFileClip(self.video_path)
-            new_audio = AudioFileClip(audio_path)
-
-            # 处理原声：降低音量到 2%
-            if video.audio:
-                original_audio = video.audio.with_volume_scaled(0.02)
-                final_audio = CompositeAudioClip([original_audio, new_audio])
-            else:
-                final_audio = new_audio
-
-            # 时长对齐
-            if new_audio.duration > video.duration:
-                # video = video.loop(duration=new_audio.duration) # OLD
-                video = video.with_effects([vfx.Loop(duration=new_audio.duration)])
-
-            # final_video = video.set_audio(final_audio) # OLD
-            final_video = video.with_audio(final_audio)
-
             output_path = str((Path(self.output_dir) / self._name_remix).resolve())
 
-            final_video.write_videofile(
+            video_inp = str(Path(self.video_path).resolve())
+            audio_inp = str(Path(audio_path).resolve())
+
+            import shutil
+
+            ffmpeg_path = shutil.which("ffmpeg")
+            if not ffmpeg_path:
+                try:
+                    import imageio_ffmpeg  # type: ignore
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    ffmpeg_path = None
+            if not ffmpeg_path:
+                logger.error("未找到 ffmpeg，无法执行混流")
+                return None
+
+            cmd = [
+                ffmpeg_path, "-y",
+                "-stream_loop", "-1", "-i", video_inp,
+                "-i", audio_inp,
+            ]
+
+            # 原视频无音轨时补一个静音轨，避免 filter_complex 报错
+            has_audio = self._has_audio_stream(video_inp)
+            if not has_audio:
+                cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+
+            filter_chains = []
+            # 音频鸭闪：当 TTS 出现时压低原声
+            if has_audio:
+                filter_chains.append("[0:a][1:a]sidechaincompress=threshold=0.02:ratio=10:attack=5:release=200[ducked]")
+                filter_chains.append("[ducked][1:a]amix=inputs=2:duration=shortest[a_out]")
+            else:
+                # 使用静音轨占位后混音
+                filter_chains.append("[2:a][1:a]amix=inputs=2:duration=shortest[a_out]")
+
+            video_map_label = "0:v"
+            subtitle_srt_path = (subtitle_srt_path or "").strip()
+            if subtitle_srt_path and Path(subtitle_srt_path).exists():
+                sub_path_esc = str(Path(subtitle_srt_path).resolve()).replace("\\", "/").replace(":", "\\:")
+                filter_chains.append(
+                    f"[0:v]subtitles='{sub_path_esc}':force_style='Fontname=Microsoft YaHei UI,Fontsize=16,PrimaryColour=&H00FFFFFF,Outline=2'[v_out]"
+                )
+                video_map_label = "[v_out]"
+
+            cmd.extend(["-filter_complex", ";".join(filter_chains)])
+
+            cmd.extend([
+                "-map", video_map_label,
+                "-map", "[a_out]",
+                "-shortest",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-c:a", "aac",
                 output_path,
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile='temp-audio.m4a',
-                remove_temp=True,
-                logger=None,
-            )
+            ])
 
             try:
-                video.close()
-                new_audio.close()
+                self.progress.emit(75, "🚀 正在进行极速渲染 (FFmpeg Native)...")
             except Exception:
                 pass
 
-            subtitle_srt_path = (subtitle_srt_path or "").strip()
-            if subtitle_srt_path:
-                try:
-                    self.progress.emit(85, "🧩 正在烧录字幕到视频...")
-                except Exception:
-                    pass
-                burned = self._burn_subtitles_ffmpeg(
-                    input_video_path=output_path,
-                    srt_path=subtitle_srt_path,
-                )
-                if burned:
-                    try:
-                        self.progress.emit(92, "✅ 字幕已烧录")
-                    except Exception:
-                        pass
-                    return burned
-                try:
-                    self.progress.emit(92, "⚠️ 字幕烧录失败（已保留 .srt 文件）")
-                except Exception:
-                    pass
+            logger.info(f"Executing FFmpeg: {' '.join(cmd)}")
+
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            proc = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            if proc.returncode != 0:
+                logger.error(f"FFmpeg Error: {proc.stderr}")
+                return None
 
             return output_path
-
         except Exception as e:
-            logger.error(f"音视频混合失败: {e}")
+            logger.error(f"FFmpeg Pipeline Failed: {e}")
             return None
+
+    def _has_audio_stream(self, video_path: str) -> bool:
+        """检测视频是否包含音轨。"""
+        try:
+            import shutil
+            ffprobe = shutil.which("ffprobe")
+            if not ffprobe:
+                return True
+            cmd = [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "default=nw=1:nk=1",
+                str(Path(video_path).resolve()),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            return (proc.stdout or "").strip() == "audio"
+        except Exception:
+            return True
 
     def _save_subtitles(self, script_text: str, audio_path: str) -> str:
         """生成并落盘 SRT 字幕。

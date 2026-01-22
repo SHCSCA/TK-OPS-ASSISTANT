@@ -107,7 +107,8 @@ class LanAirdropPanel(QWidget):
         self.qr_label = QLabel()
         self.qr_label.setFixedSize(220, 220)
         self.qr_label.setAlignment(Qt.AlignCenter)
-        self.qr_label.setStyleSheet("background:#1a1a1a;border:1px solid #444;border-radius:10px;")
+        # 使用全局主题样式，避免局部 setStyleSheet 破坏统一外观
+        self.qr_label.setObjectName("QrPanel")
         qr_row.addWidget(self.qr_label)
 
         tips = QLabel(

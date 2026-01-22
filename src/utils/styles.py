@@ -19,6 +19,47 @@ def get_global_stylesheet(theme_mode: str = "dark") -> str:
     return GLOBAL_STYLESHEET_DARK
 
 
+def apply_global_theme(app, theme_mode: str = "dark") -> None:
+    """统一应用全局主题（Qt Material + 项目 QSS）。
+
+    说明：
+    - 先应用 Qt Material 主题（如果可用）
+    - 再叠加项目自定义 QSS
+    - 使用标记避免重复叠加导致样式膨胀
+    """
+    if app is None:
+        return
+
+    # 使用 Fusion 作为基础样式，保证跨平台一致性
+    try:
+        app.setStyle("Fusion")
+    except Exception:
+        pass
+
+    # 先应用 Qt Material（如果安装）
+    try:
+        from qt_material import apply_stylesheet  # type: ignore
+    except Exception:
+        apply_stylesheet = None
+
+    if apply_stylesheet:
+        try:
+            theme = "dark_teal.xml" if str(theme_mode).lower() != "light" else "light_blue.xml"
+            apply_stylesheet(app, theme=theme)
+        except Exception:
+            pass
+
+    # 叠加项目全局 QSS（避免重复追加）
+    marker = "/* TK-OPS-GLOBAL-QSS */"
+    try:
+        base_qss = app.styleSheet() or ""
+        if marker in base_qss:
+            base_qss = base_qss.split(marker)[0].rstrip()
+        app.setStyleSheet(base_qss + "\n" + marker + "\n" + get_global_stylesheet(theme_mode))
+    except Exception:
+        pass
+
+
 # 兼容旧代码：保留 GLOBAL_STYLESHEET（默认为暗色）
 GLOBAL_STYLESHEET_DARK = """
 /* =======================================================
@@ -59,11 +100,21 @@ QListWidget#NavList {
     padding-top: 20px;
 }
 QListWidget#NavList::item {
-    height: 55px;
+    height: 50px;
     color: #bdc3c7;
-    padding-left: 25px;
+    padding-left: 30px;
     border-left: 5px solid transparent;
+    margin-bottom: 2px;
+}
+QListWidget#NavList::item:disabled {
+    background-color: transparent;
+    color: #5f6b7a;
+    font-weight: bold;
+    padding-left: 15px;
+    border-left: none;
+    margin-top: 15px;
     margin-bottom: 5px;
+    height: 30px;
 }
 QListWidget#NavList::item:selected {
     background-color: #333333;
@@ -288,6 +339,13 @@ QFrame[class="config-frame"] {
     border-radius: 10px;
     margin-bottom: 16px;
 }
+/* 通用卡片样式 (推荐) */
+QFrame[class="card"] {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-radius: 12px;
+    padding: 0px; /* 内部 Layout 控制 padding */
+}
 /* 标题文字强调 */
 QLabel {
     color: #ecf0f1;
@@ -310,6 +368,17 @@ QLabel[variant="muted"] {
     color: #bdc3c7;
 }
 
+/* 强调文字（用于金额/统计等） */
+QLabel[variant="emphasis"] {
+    font-weight: bold;
+}
+
+/* 路径类弱强调（灰色 + 斜体） */
+QLabel[variant="path-muted"] {
+    color: #888888;
+    font-style: italic;
+}
+
 /* 状态标签：通过动态属性控制颜色 */
 QLabel[status="safe"] {
     color: #00e676;
@@ -330,6 +399,24 @@ QStatusBar {
     background-color: #1e1e1e;
     color: #bdc3c7;
     border-top: 1px solid #333333;
+}
+
+/* 状态圆点（CRM 账号列表） */
+QLabel[role="status-dot"] {
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 7px;
+    border: 2px solid #1a1a1a;
+}
+QLabel[role="status-dot"][state="active"] { background-color: #00e676; }
+QLabel[role="status-dot"][state="shadowban"] { background-color: #ffca28; }
+QLabel[role="status-dot"][state="suspended"] { background-color: #757575; }
+
+/* 局域网空投二维码容器 */
+QLabel#QrPanel {
+    background-color: #1a1a1a;
+    border: 1px solid #444444;
+    border-radius: 10px;
 }
 
 /* =======================================================
@@ -417,6 +504,69 @@ QLabel[style="link"] {
     color: #00e676;
     text-decoration: underline;
 }
+
+/* =======================================================
+   Toast 通知 (Toast Notification)
+   ======================================================= */
+QFrame#ToastContainer {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-radius: 20px;
+}
+QFrame#ToastContainer[variant="success"] {
+    background-color: #1b5e20;
+    border: 1px solid #2e7d32;
+}
+QFrame#ToastContainer[variant="error"] {
+    background-color: #b71c1c;
+    border: 1px solid #c62828;
+}
+QFrame#ToastContainer[variant="warning"] {
+    background-color: #f57f17;
+    border: 1px solid #f9a825;
+}
+QFrame#ToastContainer[variant="info"] {
+    background-color: #333333;
+    border: 1px solid #444444;
+}
+
+QLabel#ToastIcon {
+    font-size: 16px;
+    font-weight: bold;
+    color: white;
+    background: transparent;
+}
+QLabel#ToastText {
+    color: white;
+    font-size: 14px;
+    background: transparent;
+}
+
+/* =======================================================
+   Specific: Profit Analysis Table (Washing Pool)
+   ======================================================= */
+QTableWidget#ProfitTable QPushButton {
+    min-width: 0px;
+    padding: 0px;
+    margin: 0px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+QTableWidget#ProfitTable QPushButton:hover {
+    background-color: #424242;
+    border: 1px solid #555555;
+}
+QTableWidget#ProfitTable QPushButton[variant="danger"] {
+    color: #ff5252; /* Bright Red Text used as Icon */
+    font-size: 14px; 
+    font-weight: bold;
+}
+QTableWidget#ProfitTable QPushButton[variant="danger"]:hover {
+    background-color: #c62828; /* Red Background on Hover */
+    color: white;
+    border: 1px solid #e53935;
+}
 """
 
 
@@ -460,11 +610,21 @@ QListWidget#NavList {
     padding-top: 20px;
 }
 QListWidget#NavList::item {
-    height: 55px;
+    height: 50px;
     color: #5f6b7a;
-    padding-left: 25px;
+    padding-left: 30px;
     border-left: 5px solid transparent;
+    margin-bottom: 2px;
+}
+QListWidget#NavList::item:disabled {
+    background-color: transparent;
+    color: #9aa4b2;
+    font-weight: bold;
+    padding-left: 15px;
+    border-left: none;
+    margin-top: 15px;
     margin-bottom: 5px;
+    height: 30px;
 }
 QListWidget#NavList::item:selected {
     background-color: #eef2f7;
@@ -691,6 +851,12 @@ QFrame[class="config-frame"] {
     border-radius: 12px;
     margin-bottom: 16px;
 }
+QFrame[class="card"] {
+    background-color: #ffffff;
+    border: 1px solid #d9deea;
+    border-radius: 12px;
+    padding: 0px;
+}
 QLabel {
     color: #1f2d3d;
 }
@@ -708,6 +874,13 @@ QLabel#h2 {
 }
 QLabel[variant="muted"] {
     color: #5f6b7a;
+}
+QLabel[variant="emphasis"] {
+    font-weight: bold;
+}
+QLabel[variant="path-muted"] {
+    color: #8d8d8d;
+    font-style: italic;
 }
 QLabel[status="safe"] {
     color: #00b85c;
@@ -734,6 +907,22 @@ QStatusBar {
     background-color: #ffffff;
     color: #5f6b7a;
     border-top: 1px solid #d9deea;
+}
+
+QLabel[role="status-dot"] {
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 7px;
+    border: 2px solid #e0e0e0;
+}
+QLabel[role="status-dot"][state="active"] { background-color: #00c853; }
+QLabel[role="status-dot"][state="shadowban"] { background-color: #f9a825; }
+QLabel[role="status-dot"][state="suspended"] { background-color: #9e9e9e; }
+
+QLabel#QrPanel {
+    background-color: #f5f5f5;
+    border: 1px solid #dddddd;
+    border-radius: 10px;
 }
 
 /* =======================================================
@@ -812,6 +1001,76 @@ QCheckBox::indicator:unchecked:hover {
 QLabel[style="link"] {
     color: #00b85c;
     text-decoration: underline;
+}
+
+/* =======================================================
+   Toast 通知 (Toast Notification)
+   ======================================================= */
+QFrame#ToastContainer {
+    background-color: #ffffff;
+    border: 1px solid #d9deea;
+    border-radius: 20px;
+}
+QFrame#ToastContainer[variant="success"] {
+    background-color: #e8f5e9;
+    border: 1px solid #c8e6c9;
+}
+QFrame#ToastContainer[variant="error"] {
+    background-color: #ffebee;
+    border: 1px solid #ffcdd2;
+}
+QFrame#ToastContainer[variant="warning"] {
+    background-color: #fffde7;
+    border: 1px solid #fff9c4;
+}
+QFrame#ToastContainer[variant="info"] {
+    background-color: #ffffff;
+    border: 1px solid #d9deea;
+}
+
+QLabel#ToastIcon {
+    font-size: 16px;
+    font-weight: bold;
+    background: transparent;
+}
+QFrame#ToastContainer[variant="success"] QLabel#ToastIcon { color: #2e7d32; }
+QFrame#ToastContainer[variant="error"] QLabel#ToastIcon { color: #c62828; }
+QFrame#ToastContainer[variant="warning"] QLabel#ToastIcon { color: #f9a825; }
+QFrame#ToastContainer[variant="info"] QLabel#ToastIcon { color: #5f6b7a; }
+
+QLabel#ToastText {
+    color: #1f2d3d;
+    font-size: 14px;
+    background: transparent;
+}
+QFrame#ToastContainer[variant="success"] QLabel#ToastText { color: #1b5e20; }
+QFrame#ToastContainer[variant="error"] QLabel#ToastText { color: #b71c1c; }
+QFrame#ToastContainer[variant="warning"] QLabel#ToastText { color: #f57f17; }
+
+/* =======================================================
+   Specific: Profit Analysis Table (Washing Pool)
+   ======================================================= */
+QTableWidget#ProfitTable QPushButton {
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+QTableWidget#ProfitTable QPushButton:hover {
+    background-color: #eef2f7;
+    border: 1px solid #d9deea;
+}
+QTableWidget#ProfitTable QPushButton[variant="danger"] {
+    color: #e74c3c; /* Red Text */
+    font-size: 14px;
+    font-weight: bold;
+}
+QTableWidget#ProfitTable QPushButton[variant="danger"]:hover {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ffcdd2;
 }
 """
 

@@ -49,11 +49,13 @@ from workers.ai_content_worker import AIContentWorker
 from workers.ai_script_worker import AIScriptWorker
 from workers.timeline_script_worker import TimelineScriptWorker
 from workers.photo_video_worker import PhotoVideoWorker
+from workers.video_worker import CyborgComposeWorker
 from utils.ui_log import append_log, install_log_context_menu
+from ui.toast import Toast
 
 
 class AIContentFactoryPanel(QWidget):
-    """AI 二创工厂（视频自动二创）"""
+    """AI 二创工厂（视频自动二创 & 半人马拼接）"""
 
     def __init__(self, *, enable_photo: bool = True, photo_only: bool = False):
         super().__init__()
@@ -62,6 +64,7 @@ class AIContentFactoryPanel(QWidget):
         self.worker: AIContentWorker | None = None
         self.script_worker: AIScriptWorker | None = None
         self.photo_worker: PhotoVideoWorker | None = None
+        self.cyborg_worker: CyborgComposeWorker | None = None
         self._approved_script_text: str = ""
         self._approved_script_json: dict | None = None
         self._token_usage = {"prompt": 0, "completion": 0, "total": 0}
@@ -87,17 +90,28 @@ class AIContentFactoryPanel(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        
+        # Tabs Container
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setObjectName("MainAIContentTabs")
+        layout.addWidget(self.main_tabs)
 
-        base_tab = QWidget()
-        script_tab = QWidget()
-        compose_tab = QWidget()
-        photo_tab = QWidget()
-        log_tab = QWidget()
+        # ----------- [Tab A] 智能解说二创 (Original Logic) -----------
+        self.tab_smart_narrate = QWidget()
+        self._init_smart_narrate_ui(self.tab_smart_narrate)
+        self.main_tabs.addTab(self.tab_smart_narrate, "🎙️ 智能解说二创")
 
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("AIContentTabs")
+        # ----------- [Tab B] 半人马拼接 (New Logic) -----------
+        self.tab_cyborg = QWidget()
+        self._init_cyborg_ui(self.tab_cyborg)
+        self.main_tabs.addTab(self.tab_cyborg, "🐴 半人马拼接")
 
-        title = QLabel("AI 二创工厂")
+        self.setLayout(layout)
+
+    def _init_smart_narrate_ui(self, parent):
+        layout = QVBoxLayout(parent)
+        
+        title = QLabel("智能解说二创")
         title.setObjectName("h1")
         layout.addWidget(title)
 
@@ -108,6 +122,15 @@ class AIContentFactoryPanel(QWidget):
         desc.setProperty("variant", "muted")
         layout.addWidget(desc)
 
+        # Inner Tabs for smart narrate steps
+        self.tabs = QTabWidget() 
+        self.tabs.setObjectName("AIContentTabs")
+        layout.addWidget(self.tabs)
+        
+        # -------------------------------------------------------------
+        # Legacy/Original Tab Construction Logic (Adapted)
+        # -------------------------------------------------------------
+        
         # ===================== Tab 1: 基础信息 =====================
         base_tab = QWidget()
         base_layout = QVBoxLayout(base_tab)
@@ -115,7 +138,7 @@ class AIContentFactoryPanel(QWidget):
         base_layout.setSpacing(12)
 
         basic_frame = QFrame()
-        basic_frame.setProperty("class", "config-frame")
+        basic_frame.setProperty("class", "card") # Updated to card
         basic_form = QVBoxLayout(basic_frame)
 
         basic_title = QLabel("基础信息")
@@ -228,6 +251,14 @@ class AIContentFactoryPanel(QWidget):
         self.script_mode_combo.currentIndexChanged.connect(self._on_script_mode_changed)
         mode_row.addWidget(self.script_mode_combo)
 
+        mode_row.addWidget(QLabel("人设："))
+        self.persona_combo = QComboBox()
+        self.persona_combo.addItem("默认（不注入）", "")
+        self.persona_combo.addItem("The Bestie (闺蜜)", "bestie")
+        self.persona_combo.addItem("The Skeptic (怀疑论者)", "skeptic")
+        self.persona_combo.addItem("The Expert (专家)", "expert")
+        mode_row.addWidget(self.persona_combo)
+
         mode_row.addWidget(QLabel("视频总时长(秒)："))
         self.timeline_duration_spin = QDoubleSpinBox()
         self.timeline_duration_spin.setRange(5.0, 120.0)
@@ -268,8 +299,8 @@ class AIContentFactoryPanel(QWidget):
 
         # Token 成本显示（按钮行上方）
         self.script_token_summary = QLabel("本次 Token 消耗：P(输入)=0 / C(输出)=0 / T(合计)=0 | 费用：未配置")
-        self.script_token_summary.setProperty("variant", "muted")
-        self.script_token_summary.setStyleSheet("QLabel { font-weight: bold; }")
+        # 使用全局主题样式（强调/弱化由 QSS 控制）
+        self.script_token_summary.setProperty("variant", "emphasis")
         step1_form.addWidget(self.script_token_summary)
 
         script_btn_row = QHBoxLayout()
@@ -666,9 +697,157 @@ class AIContentFactoryPanel(QWidget):
             self._tab_index["photo"] = self.tabs.addTab(photo_tab, "④ 图文成片")
         self._tab_index["log"] = self.tabs.addTab(log_tab, "运行日志")
 
-        layout.addWidget(self.tabs, 1)
+        # layout.addWidget(self.tabs, 1) -> Moved to top
+        # self.setLayout(layout) -> Handled by parent wrapper
 
-        self.setLayout(layout)
+    def _init_cyborg_ui(self, parent):
+        """Initialize Cyborg Splicing Tab"""
+        layout = QVBoxLayout(parent)
+        layout.setSpacing(12)
+        
+        # Header
+        title = QLabel("半人马拼接 (Cyborg Splicing)")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+        
+        desc = QLabel(
+            "说明：自动化拼接“原创片头 + 混剪中段 + 原创片尾”。\n"
+            "结构：[0-2s 原创] + [Deep Remix 中段] + [5-7s 原创]"
+        )
+        desc.setProperty("variant", "muted")
+        layout.addWidget(desc)
+
+        # Input Form
+        form_frame = QFrame()
+        form_frame.setProperty("class", "card")
+        form_layout = QVBoxLayout(form_frame)
+        form_layout.setSpacing(12)
+
+        # Intro
+        row_intro = QHBoxLayout()
+        row_intro.addWidget(QLabel("① 片头视频 (Intro):"))
+        self.cyborg_intro_input = QLineEdit()
+        self.cyborg_intro_input.setPlaceholderText("选择 0-2秒 原创实拍视频...")
+        row_intro.addWidget(self.cyborg_intro_input, 1)
+        btn_intro = QPushButton("选择")
+        btn_intro.clicked.connect(lambda: self._pick_file(self.cyborg_intro_input))
+        row_intro.addWidget(btn_intro)
+        form_layout.addLayout(row_intro)
+
+        # Mid
+        row_mid = QHBoxLayout()
+        row_mid.addWidget(QLabel("② 中段素材 (Mid):"))
+        self.cyborg_mid_input = QLineEdit()
+        self.cyborg_mid_input.setPlaceholderText("选择需混剪的长视频素材...")
+        row_mid.addWidget(self.cyborg_mid_input, 1)
+        btn_mid = QPushButton("选择")
+        btn_mid.clicked.connect(lambda: self._pick_file(self.cyborg_mid_input))
+        row_mid.addWidget(btn_mid)
+        form_layout.addLayout(row_mid)
+
+        # Outro
+        row_outro = QHBoxLayout()
+        row_outro.addWidget(QLabel("③ 片尾视频 (Outro):"))
+        self.cyborg_outro_input = QLineEdit()
+        self.cyborg_outro_input.setPlaceholderText("选择 5-7秒 原创实拍视频...")
+        row_outro.addWidget(self.cyborg_outro_input, 1)
+        btn_outro = QPushButton("选择")
+        btn_outro.clicked.connect(lambda: self._pick_file(self.cyborg_outro_input))
+        row_outro.addWidget(btn_outro)
+        form_layout.addLayout(row_outro)
+
+        layout.addWidget(form_frame)
+        
+        # Options
+        opt_frame = QFrame()
+        opt_frame.setProperty("class", "config-frame")
+        opt_layout = QHBoxLayout(opt_frame)
+        
+        self.cyborg_deep_remix_chk = QCheckBox("启用深度混剪 (Deep Remix)")
+        self.cyborg_deep_remix_chk.setChecked(True)
+        self.cyborg_deep_remix_chk.setToolTip("对中段视频进行变速、微缩放、去元数据等处理")
+        opt_layout.addWidget(self.cyborg_deep_remix_chk)
+        
+        opt_layout.addStretch()
+        layout.addWidget(opt_frame)
+
+        # Action Area
+        action_layout = QHBoxLayout()
+        self.cyborg_start_btn = QPushButton("开始拼接 (Start Compose)")
+        self.cyborg_start_btn.setProperty("variant", "primary")
+        self.cyborg_start_btn.clicked.connect(self._run_cyborg_compose)
+        self.cyborg_start_btn.setMinimumHeight(45)
+        action_layout.addWidget(self.cyborg_start_btn)
+        
+        layout.addLayout(action_layout)
+        layout.addStretch()
+
+        # Log Area for Cyborg
+        self.cyborg_log = QTextEdit()
+        self.cyborg_log.setReadOnly(True)
+        self.cyborg_log.setMaximumHeight(150)
+        self.cyborg_log.setPlaceholderText("任务日志将显示在这里...")
+        install_log_context_menu(self.cyborg_log)
+        layout.addWidget(QLabel("任务日志:"))
+        layout.addWidget(self.cyborg_log)
+
+    def _pick_file(self, line_edit: QLineEdit):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择视频文件", "", "Video Files (*.mp4 *.mov *.mkv *.avi);;All Files (*)"
+        )
+        if path:
+            line_edit.setText(path)
+
+    def _run_cyborg_compose(self):
+        intro = self.cyborg_intro_input.text().strip()
+        mid = self.cyborg_mid_input.text().strip()
+        outro = self.cyborg_outro_input.text().strip()
+        
+        if not (intro and mid and outro):
+            QMessageBox.warning(self, "参数缺失", "请完整选择 片头、中段、片尾 三个视频文件。")
+            return
+            
+        if self.cyborg_worker is not None:
+             QMessageBox.warning(self, "任务进行中", "当前已有拼接任务在运行，请稍候。")
+             return
+
+        self.cyborg_log.clear()
+        append_log(self.cyborg_log, ">>> 启动半人马拼接任务...")
+        self.cyborg_start_btn.setEnabled(False)
+        
+        # Output setup
+        out_dir = Path(config.OUTPUT_DIR) / "Cyborg_Output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.cyborg_worker = CyborgComposeWorker(
+            intro_path=intro,
+            mid_path=mid,
+            outro_path=outro,
+            output_dir=str(out_dir),
+            do_deep_remix=self.cyborg_deep_remix_chk.isChecked()
+        )
+        self.cyborg_worker.progress_signal.connect(lambda msg: append_log(self.cyborg_log, msg))
+        self.cyborg_worker.finished_signal.connect(self._on_cyborg_finished)
+        self.cyborg_worker.error_signal.connect(self._on_cyborg_error)
+        self.cyborg_worker.start()
+
+    def _on_cyborg_finished(self, out_path: str):
+        self.cyborg_start_btn.setEnabled(True)
+        self.cyborg_worker = None
+        append_log(self.cyborg_log, f"✅ 拼接成功！输出文件:\n{out_path}")
+        Toast.show_success(self, "半人马拼接完成", duration=3000)
+        
+        # Try to open folder
+        try:
+            os.startfile(str(Path(out_path).parent))
+        except Exception:
+            pass
+
+    def _on_cyborg_error(self, err_msg: str):
+        self.cyborg_start_btn.setEnabled(True)
+        self.cyborg_worker = None
+        append_log(self.cyborg_log, f"❌ 任务失败: {err_msg}")
+        QMessageBox.critical(self, "拼接失败", f"错误详情:\n{err_msg}")
 
     def _switch_to_tab(self, key: str) -> None:
         try:
@@ -1095,6 +1274,11 @@ class AIContentFactoryPanel(QWidget):
         self.start_btn.setEnabled(False)
 
         role_prompt = self._role_prompt_from_ui()
+        persona_key = ""
+        try:
+            persona_key = str(self.persona_combo.currentData() or "").strip()
+        except Exception:
+            persona_key = ""
         skip_tts = bool(self.skip_tts_checkbox.isChecked())
 
         # Worker 内部会自己创建输出目录，这里仍传入绝对路径确保一致
@@ -1163,6 +1347,7 @@ class AIContentFactoryPanel(QWidget):
             self.script_worker = AIScriptWorker(
                 product_desc=desc,
                 role_prompt=role_prompt,
+                persona_key=persona_key,
                 model=(getattr(config, "AI_MODEL", "") or "").strip(),
                 max_attempts=3,
                 strict_validation=True,

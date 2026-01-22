@@ -60,8 +60,9 @@ class DownloaderPanel(QWidget):
         layout.addWidget(tip)
 
         config_frame = QFrame()
-        config_frame.setProperty("class", "config-frame")
+        config_frame.setProperty("class", "card")
         config_layout = QHBoxLayout(config_frame)
+        config_layout.setContentsMargins(20, 20, 20, 20)
 
         # 左侧：目录信息 + 按钮
         left_col = QVBoxLayout()

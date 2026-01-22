@@ -4,7 +4,8 @@
 """
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTableWidget, QTableWidgetItem, QHeaderView, 
-                             QLabel, QFileDialog, QMenu, QProgressBar, QMessageBox)
+                             QLabel, QFileDialog, QMenu, QProgressBar, QMessageBox,
+                             QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QApplication)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent
 import config
@@ -26,6 +27,8 @@ class ProfitAnalysisWidget(QWidget):
         self.current_data = []
         self.load_profit_params()
         self.init_ui()
+        # 启动时自动加载历史数据
+        self.load_history_from_db()
 
     def load_profit_params(self):
         """从数据库加载利润核算参数（V2.0: profit_config），失败则回退默认值。"""
@@ -95,12 +98,19 @@ class ProfitAnalysisWidget(QWidget):
         
         # 3. 参数显示栏
         param_bar = QHBoxLayout()
-        param_label = QLabel(
+        self.param_label = QLabel(
             f"💵 当前参数: 汇率 {self.exchange_rate} | 运费 ${self.shipping_cost}/kg | "
             f"佣金 {int(self.commission*100)}% + ${self.fixed_fee}"
         )
-        param_label.setProperty("variant", "muted")
-        param_bar.addWidget(param_label)
+        self.param_label.setProperty("variant", "muted")
+        param_bar.addWidget(self.param_label)
+        
+        btn_config = QPushButton("⚙️ 配置参数")
+        btn_config.setFixedSize(90, 26)
+        btn_config.clicked.connect(self.open_config_dialog)
+        param_bar.addWidget(btn_config)
+        
+        param_bar.addStretch() # Ensure left alignment
         
         # 4. 进度条（初始隐藏）
         self.progress_bar = QProgressBar()
@@ -108,6 +118,7 @@ class ProfitAnalysisWidget(QWidget):
 
         # 5. 数据表格
         self.table = QTableWidget()
+        self.table.setObjectName("ProfitTable")
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "商品标题", "TK售价($)", "销量", "1688进价(¥)", "重量(kg)", "净利润($)", "ROI(%)", "操作"
@@ -117,8 +128,11 @@ class ProfitAnalysisWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         for i in [1, 2, 3, 4, 5, 6]:
             self.table.setColumnWidth(i, 100)
-        self.table.setColumnWidth(7, 80)
         
+        # 增加操作列宽度，确保按钮不被遮挡
+        self.table.setColumnWidth(7, 35) 
+        
+        self.table.verticalHeader().setDefaultSectionSize(38) # Ensure comfortable row height
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.DoubleClicked)
@@ -213,13 +227,69 @@ class ProfitAnalysisWidget(QWidget):
             roi_item.setFlags(roi_item.flags() ^ Qt.ItemIsEditable)
             self.table.setItem(row_idx, 6, roi_item)
 
-            # 操作按钮
-            self.table.setItem(row_idx, 7, QTableWidgetItem("🔍"))
+            # 操作按钮 (Use cell widget for real buttons)
+            btn_container = QWidget()
+            btn_layout = QHBoxLayout(btn_container)
+            btn_layout.setContentsMargins(0, 0, 0, 0) # Maximize space usage
+            btn_layout.setSpacing(0)
+            
+            btn_del = QPushButton("➖")
+            btn_del.setToolTip("删除此行")
+            # 移除硬编码尺寸，改用 QSS 控制 (Global Theme)
+            # btn_del.setFixedSize(24, 20) 
+            btn_del.setProperty("class", "table-action-btn")
+            btn_del.setProperty("variant", "danger") 
+            
+            # Use closure to capture current row reference logic if needed, 
+            # but usually row index changes on deletion. 
+            # Better to store row id or use `indexAt` in slot.
+            btn_del.clicked.connect(lambda _, r=row_idx: self.delete_row(r))
+            
+            # Re-bind is tricky with lambdas if rows shift. 
+            # A cleaner way is using `sender()` and `indexAt`.
+            # We will use a standard method instead of lambda for safety.
+            btn_del.clicked.disconnect()
+            btn_del.clicked.connect(self.on_delete_clicked)
+            
+            # Align center
+            btn_layout.addWidget(btn_del)
+            btn_layout.setAlignment(Qt.AlignCenter) 
+            self.table.setCellWidget(row_idx, 7, btn_container)
 
             # 初始计算
             self.calculate_row_profit(row_idx)
 
         self.table.blockSignals(False)
+
+    def on_delete_clicked(self):
+        """Handle delete button click"""
+        btn = self.sender()
+        if not btn: return
+        
+        # Find which row contains this button
+        # btn -> layout -> container -> table
+        # simpler: map position
+        pos = btn.parent().mapToGlobal(btn.pos())
+        pos_in_table = self.table.viewport().mapFromGlobal(pos)
+        row = self.table.rowAt(pos_in_table.y())
+        
+        if row >= 0:
+            self.delete_row(row)
+
+    def delete_row(self, row):
+        """Remove row from data and table"""
+        if 0 <= row < len(self.current_data):
+            # Check DB ID if exists to delete from DB? 
+            # Current logic just saves good ones to DB on demand.
+            # If we want to delete from DB, we need ID linkage.
+            # For now, just remove from UI list.
+            
+            # Confirm
+            # res = QMessageBox.question(self, "确认", "删除此行？", QMessageBox.Yes | QMessageBox.No)
+            # if res != QMessageBox.Yes: return
+
+            del self.current_data[row]
+            self.table.removeRow(row)
 
     def on_cell_changed(self, row, column):
         """单元格修改时触发重算"""
@@ -300,12 +370,176 @@ class ProfitAnalysisWidget(QWidget):
         elif action == search_action:
             QMessageBox.information(self, "功能开发中", "1688 图搜功能将在后续版本提供")
 
+    def open_config_dialog(self):
+        """打开参数配置对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("利润核算参数配置")
+        dialog.setFixedWidth(350)
+        
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        
+        sb_exchange = QDoubleSpinBox()
+        sb_exchange.setRange(1, 20)
+        sb_exchange.setDecimals(4)
+        sb_exchange.setValue(self.exchange_rate)
+        form.addRow("汇率 (USD->CNY):", sb_exchange)
+        
+        sb_shipping = QDoubleSpinBox()
+        sb_shipping.setRange(0, 100)
+        sb_shipping.setValue(self.shipping_cost)
+        sb_shipping.setSuffix(" $/kg")
+        form.addRow("物流单价:", sb_shipping)
+        
+        sb_commission = QDoubleSpinBox()
+        sb_commission.setRange(0, 1)
+        sb_commission.setSingleStep(0.01)
+        sb_commission.setValue(self.commission)
+        form.addRow("平台佣金率:", sb_commission)
+        
+        sb_fixed = QDoubleSpinBox()
+        sb_fixed.setRange(0, 100)
+        sb_fixed.setValue(self.fixed_fee)
+        sb_fixed.setSuffix(" $")
+        form.addRow("固定费用:", sb_fixed)
+        
+        layout.addLayout(form)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            # Update values
+            self.exchange_rate = sb_exchange.value()
+            self.shipping_cost = sb_shipping.value()
+            self.commission = sb_commission.value()
+            self.fixed_fee = sb_fixed.value()
+            
+            # Save to DB
+            self.save_profit_params()
+            
+            # Update UI Link
+            self.param_label.setText(
+                f"💵 当前参数: 汇率 {self.exchange_rate} | 运费 ${self.shipping_cost}/kg | "
+                f"佣金 {int(self.commission*100)}% + ${self.fixed_fee}"
+            )
+            
+            # Recalculate all rows
+            for i in range(self.table.rowCount()):
+                self.calculate_row_profit(i)
+                
+            QMessageBox.information(self, "更新成功", "参数已更新，所有商品利润已重新计算。")
+
+    def save_profit_params(self):
+        """保存参数到数据库"""
+        try:
+            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
+                updates = [
+                    ("exchange_rate", str(self.exchange_rate)),
+                    ("shipping_cost_per_kg", str(self.shipping_cost)),
+                    ("platform_commission", str(self.commission)),
+                    ("fixed_fee", str(self.fixed_fee)),
+                ]
+                cur.executemany("INSERT OR REPLACE INTO profit_config (key, value) VALUES (?, ?)", updates)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Save params failed: {e}")
+
     def analyze_product_ai(self, title):
-        """调用 AI 参谋（预留接口，Phase 3 实现）"""
-        QMessageBox.information(
-            self, "AI 参谋", 
-            f"正在分析商品：{title}\n\n该功能将在 Phase 3 中集成 DeepSeek API"
-        )
+        """调用 AI 参谋 (DeepSeek)"""
+        from api.deepseek_client import get_deepseek_client
+        from ui.toast import Toast
+        
+        client = get_deepseek_client()
+        if not client.is_configured():
+            QMessageBox.warning(self, "未配置", "AI 参谋需要配置 DeepSeek API Key。\n请前往【系统设置】进行配置。")
+            return
+
+        # Find row data
+        row_data = None
+        for item in self.current_data:
+            if item['title'] == title:
+                row_data = item
+                break
+        
+        if not row_data:
+            return
+
+        Toast.show_info(self, f"正在分析商品: {title[:15]}...")
+        QApplication.processEvents()
+
+        # Call AI (Synchronous for now, ideally strictly async worker)
+        # For simple text analysis, sync call might freeze UI for 2-5s, OK for MVP.
+        # Improvement: Move to thread.
+        try:
+            analysis = client.analyze_product_potential(
+                title, 
+                row_data.get('tk_price', 0), 
+                row_data.get('sales', 0)
+            )
+            
+            # Show Result Dialog
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(f"AI 参谋报告 - {title[:10]}...")
+            msg_box.setText(analysis)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.setStyleSheet("QLabel{min-width: 400px;}")
+            msg_box.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "分析失败", str(e))
+
+    def load_history_from_db(self):
+        """从数据库加载历史选品数据"""
+        try:
+            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
+            if not Path(db_path).exists():
+                return
+                
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                # 检查表是否存在
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='product_history'")
+                if not cursor.fetchone():
+                    return
+
+                # 读取最新的 500 条数据
+                cursor.execute("""
+                    SELECT title, tk_price, sales_count, cny_cost, weight, net_profit, source_file, image_url
+                    FROM product_history 
+                    ORDER BY created_at DESC 
+                    LIMIT 500
+                """)
+                rows = cursor.fetchall()
+            
+            if not rows:
+                return
+
+            new_data = []
+            for r in rows:
+                new_data.append({
+                    "title": r[0],
+                    "tk_price": r[1],
+                    "sales": r[2], # Map DB sales_count to dict sales
+                    "cny_cost": r[3],
+                    "weight": r[4],
+                    "net_profit": r[5],
+                    "source_file": r[6],
+                    "image_url": r[7]
+                })
+            
+            self.current_data = new_data
+            self.populate_table()
+            self.lbl_status.setText(f"📂 已加载 {len(rows)} 条历史记录")
+            logger.info(f"[PROFIT] Loaded {len(rows)} history records from DB")
+
+        except Exception as e:
+            logger.error(f"加载历史数据失败: {e}")
+            self.lbl_status.setText(f"❌ 加载历史失败: {e}")
 
     def save_to_database(self):
         """保存当前数据到 SQLite"""

@@ -206,3 +206,26 @@ def generate_tiktok_copy(desc_cn: str, tone: str, role_prompt: str = "", model: 
     notes = [str(x).strip() for x in notes if str(x).strip()]
 
     return {"titles": titles, "hashtags": hashtags, "notes": notes}
+
+
+def analyze_comment_lead(comment_text: str) -> Dict[str, object]:
+    """评论意向分级（Lead Scoring）。
+
+    返回：
+        {"lead_tier": 1|2|3, "sentiment_score": 0~1, "reply": "..."}
+    """
+    text = (comment_text or "").strip()
+    if not text:
+        return {"lead_tier": 3, "sentiment_score": 0.0, "reply": ""}
+
+    keywords = [x.strip().lower() for x in (getattr(config, "COMMENT_WATCH_KEYWORDS", "") or "").split(",") if x.strip()]
+    blocklist = [x.strip().lower() for x in (getattr(config, "COMMENT_BLOCKLIST", "") or "").split(",") if x.strip()]
+    low = text.lower()
+
+    if any(k in low for k in keywords):
+        return {"lead_tier": 1, "sentiment_score": 0.8, "reply": "Thanks! Which color do you like?"}
+    if any(k in low for k in blocklist):
+        return {"lead_tier": 3, "sentiment_score": 0.2, "reply": ""}
+
+    # 默认互动档
+    return {"lead_tier": 2, "sentiment_score": 0.6, "reply": "Right? Which part caught your eye?"}
