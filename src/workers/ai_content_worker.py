@@ -14,6 +14,7 @@ import config
 
 from tts import synthesize as tts_synthesize
 from tts.types import TtsError, TtsForbiddenError
+from video.processor import VideoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -339,91 +340,95 @@ Output ONLY the script text, no formatting.
             return None, str(e)
 
     def synthesize_timeline_voice(self, timeline: list[dict]) -> tuple[str, str]:
-        """根据时间轴逐段合成语音，并做弹性对齐。"""
-        try:
-            from moviepy import AudioFileClip, AudioClip, concatenate_audioclips
-        except Exception as e:
-            return "", f"MoviePy 依赖缺失：{e}"
-
+        """根据时间轴逐段合成语音，并做弹性对齐 (FFmpeg版)。"""
         audio_path = Path(self.output_dir) / self._name_voice_timeline
+        processor = VideoProcessor()
 
         provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
         fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
-        clips = []
+        
+        clips_to_concat = [] 
         current_time = 0.0
-
-        def _silence(duration: float):
-            if duration <= 0:
-                return None
-            return AudioClip(lambda t: 0, duration=duration, fps=44100)
+        
+        # Helper for TTS generation
+        def _gen_tts(txt, emo, out):
+            try:
+                tts_synthesize(text=txt, out_path=out, provider=provider, emotion=emo)
+                return True
+            except Exception:
+                if fallback:
+                    try:
+                        tts_synthesize(text=txt, out_path=out, provider=fallback, emotion=emo)
+                        return True
+                    except: pass
+            return False
 
         try:
             for i, seg in enumerate(timeline):
-                if not isinstance(seg, dict):
-                    continue
+                if not isinstance(seg, dict): continue
                 try:
                     start = float(seg.get("start", 0))
                     end = float(seg.get("end", 0))
-                except Exception:
-                    continue
+                except Exception: continue
+                
                 text = (seg.get("text", "") or "").strip()
                 emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
-                if not text or end <= start:
-                    continue
+                if not text or end <= start: continue
 
-                # gap
+                # 1. Handle Gap (Silence)
                 if start > current_time:
                     gap = start - current_time
-                    s = _silence(gap)
-                    if s:
-                        clips.append(s)
-                        current_time += gap
+                    if gap > 0.05:
+                        silence_path = Path(self.output_dir) / f"silence_{i}_{int(gap*1000)}.mp3"
+                        if processor.generate_silence(gap, str(silence_path)):
+                            clips_to_concat.append(str(silence_path))
+                    current_time = start # Align to start
 
+                # 2. Generate TTS
                 seg_out = Path(self.output_dir) / f"tts_seg_{i:03d}.mp3"
-                try:
-                    tts_synthesize(text=text, out_path=seg_out, provider=provider, emotion=emotion)
-                except Exception as e:
-                    if fallback:
-                        try:
-                            tts_synthesize(text=text, out_path=seg_out, provider=fallback, emotion=emotion)
-                        except Exception as e2:
-                            return "", f"TTS 分段失败：{e}；备用失败：{e2}"
-                    else:
-                        return "", f"TTS 分段失败：{e}"
-
+                if not _gen_tts(text, emotion, seg_out):
+                    return "", f"TTS generation failed for segment {i}"
+                
                 if not seg_out.exists():
-                    return "", "分段配音文件未生成"
+                     return "", f"TTS file missing for segment {i}"
 
-                clip = AudioFileClip(str(seg_out))
+                # 3. Align Duration
+                dur = processor.get_audio_duration(str(seg_out))
                 slot = max(0.1, end - start)
-                dur = float(getattr(clip, "duration", 0.0) or 0.0)
-
-                # 弹性对齐
-                if dur > slot:
+                
+                # Check speed factor
+                if dur > slot + 0.1: # Tolerance
+                    # Speed up
                     factor = dur / slot
-                    try:
-                        clip = clip.with_speed_scaled(factor)
-                    except Exception:
-                        pass
-                elif dur < slot:
+                    speed_out = Path(self.output_dir) / f"tts_seg_{i:03d}_speed.mp3"
+                    if processor.adjust_audio_speed(str(seg_out), str(speed_out), factor):
+                        clips_to_concat.append(str(speed_out))
+                    else:
+                        # Fallback to original
+                        clips_to_concat.append(str(seg_out))
+                elif dur < slot - 0.1:
+                    # Pad
+                    clips_to_concat.append(str(seg_out))
                     pad = slot - dur
-                    s = _silence(pad)
-                    if s:
-                        clips.append(clip)
-                        clips.append(s)
-                        current_time = end
-                        continue
+                    pad_path = Path(self.output_dir) / f"pad_{i}_{int(pad*1000)}.mp3"
+                    if processor.generate_silence(pad, str(pad_path)):
+                        clips_to_concat.append(str(pad_path))
+                else:
+                    clips_to_concat.append(str(seg_out))
 
-                clips.append(clip)
                 current_time = end
 
-            if not clips:
+            if not clips_to_concat:
                 return "", "时间轴为空或无法生成配音"
 
-            final_audio = concatenate_audioclips(clips)
-            final_audio.write_audiofile(str(audio_path), logger=None)
-            return str(audio_path), ""
+            # Concat all
+            if processor.concat_audio_files(clips_to_concat, str(audio_path)):
+                return str(audio_path), ""
+            else:
+                return "", "音频拼接失败"
+
         except Exception as e:
+            logger.error(f"Timeline synthesis failed: {e}", exc_info=True)
             return "", f"时间轴配音失败：{e}"
     def _save_script(self, script: str) -> str:
         try:
@@ -592,18 +597,12 @@ Output ONLY the script text, no formatting.
         - 时轴按音频总时长做均匀/按文本长度加权分配
         """
         try:
-            from moviepy import AudioFileClip
-
+            # Removed MoviePy dependency
             s = (script_text or "").strip()
             if not s:
                 return ""
 
-            audio = AudioFileClip(audio_path)
-            duration = float(getattr(audio, "duration", 0.0) or 0.0)
-            try:
-                audio.close()
-            except Exception:
-                pass
+            duration = VideoProcessor().get_audio_duration(audio_path)
 
             if duration <= 0.2:
                 return ""
@@ -1015,27 +1014,9 @@ Output ONLY the script text, no formatting.
                                 return h
         except Exception:
             pass
-
-        # 2) 回退 moviepy
-        try:
-            from moviepy import VideoFileClip
-
-            clip = VideoFileClip(video_path)
-            try:
-                h = int(getattr(clip, "h", 0) or 0)
-                if not h:
-                    size = getattr(clip, "size", None)
-                    if size and len(size) == 2:
-                        h = int(size[1])
-            finally:
-                try:
-                    clip.close()
-                except Exception:
-                    pass
-            # 默认回退：优先按“手机竖屏高度”估算，保证字幕不至于过小
-            return h if h > 0 else 1920
-        except Exception:
-            return 1920
+        
+        # Fallback default
+        return 1920
 
     def _prepare_job_dir(self, base_dir: Path, stem_safe: str) -> Path:
         """按输入文件名创建子目录；冲突时自动追加序号，避免覆盖。"""

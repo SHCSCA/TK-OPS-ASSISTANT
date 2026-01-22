@@ -11,6 +11,15 @@ from dotenv import load_dotenv, set_key
 # 项目基础路径配置
 # ===================================================
 
+# Version
+APP_VERSION = "2.2.0"
+
+# Telemetry
+SENTRY_DSN = os.getenv("SENTRY_DSN", "") # 空字符串表示禁用
+
+# Auto Update
+UPDATE_CHECK_URL = os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/your_username/tk-ops-assistant/releases/latest")
+
 def _is_frozen() -> bool:
 	return bool(getattr(sys, "frozen", False))
 

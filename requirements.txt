@@ -43,4 +43,8 @@ pytest==7.4.0
 # Database
 SQLAlchemy>=2.0.0
 
+# Telemetry & Utils
+sentry-sdk
+packaging
+
 numpy==1.26.4

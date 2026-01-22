@@ -108,3 +108,21 @@ class DMTask(Base):
     message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.now)
     handled_at = Column(DateTime, nullable=True)
+
+class ProcessingLog(Base):
+    """
+    处理记录表
+    Logs for video processing tasks.
+    """
+    __tablename__ = "processing_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset_id = Column(String, nullable=False, index=True) # ForeignKey to Asset.asset_id ideally, but we use string logical link
+    process_type = Column(String, nullable=True) # video_remix / compress / etc
+    input_path = Column(String, nullable=True)
+    output_path = Column(String, nullable=True)
+    params = Column(Text, nullable=True) # JSON string
+    status = Column(String, nullable=True) # success / failed
+    error_msg = Column(Text, nullable=True)
+    elapsed_seconds = Column(Float, nullable=True)
+    created_at = Column(TIMESTAMP, server_default=func.now())

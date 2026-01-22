@@ -68,6 +68,131 @@ class VideoProcessor:
         except Exception:
             return True
 
+    def get_audio_duration(self, audio_path: str) -> float:
+        """获取音频时长 (sec)"""
+        try:
+            ffprobe = shutil.which("ffprobe")
+            if not ffprobe:
+                return 0.0
+            cmd = [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path)
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            return float(proc.stdout.strip())
+        except Exception:
+            return 0.0
+
+    def adjust_audio_speed(self, input_path: str, output_path: str, speed: float) -> bool:
+        """调整音频速度 (atempo)"""
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg: return False
+            
+            # atempo limited to 0.5 to 2.0. Chain if needed.
+            # Simplified: assuming speed is within reasonable range (0.5 - 10.0)
+            # For > 2.0, need multiple filters.
+            
+            # We construct filter chain
+            filter_str = ""
+            remaining = speed
+            while remaining > 2.0:
+                filter_str += "atempo=2.0,"
+                remaining /= 2.0
+            while remaining < 0.5:
+                filter_str += "atempo=0.5,"
+                remaining /= 0.5
+            
+            filter_str += f"atempo={remaining}"
+            
+            cmd = [
+                ffmpeg, "-y",
+                "-i", str(input_path),
+                "-filter:a", filter_str,
+                "-vn", str(output_path)
+            ]
+            ok, err = self._run_ffmpeg(cmd)
+            return ok
+        except Exception:
+            return False
+
+    def generate_silence(self, duration: float, output_path: str) -> bool:
+        """生成静音片段"""
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg: return False
+            
+            cmd = [
+                ffmpeg, "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", str(duration),
+                str(output_path)
+            ]
+            ok, err = self._run_ffmpeg(cmd)
+            return ok
+        except Exception:
+            return False
+
+    def concat_audio_files(self, file_paths: list[str], output_path: str) -> bool:
+        """拼接音频文件列表 (concat demuxer)"""
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg: return False
+            
+            # Create list file
+            list_path = Path(output_path).parent / f"concat_list_{int(time.time()*1000)}.txt"
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in file_paths:
+                    # Escape path for ffmpeg concat demuxer
+                    safe_path = str(Path(p).resolve()).replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+            
+            cmd = [
+                ffmpeg, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_path),
+                "-c", "copy",
+                str(output_path)
+            ]
+            ok, err = self._run_ffmpeg(cmd)
+            
+            # Cleanup list file
+            try:
+                os.remove(list_path)
+            except:
+                pass
+                
+            return ok
+        except Exception:
+            return False
+
+    def merge_av(self, video_path: str, audio_path: str, output_path: str) -> Tuple[bool, str]:
+        """合并音视频 (替换原音频)"""
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg: return False, "No ffmpeg"
+            
+            cmd = [
+                ffmpeg, "-y",
+                "-i", str(video_path),
+                "-i", str(audio_path),
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                str(output_path)
+            ]
+            ok, err = self._run_ffmpeg(cmd)
+            if not ok: return False, err
+            return True, str(output_path)
+        except Exception as e:
+            return False, str(e)
+
     def compose_cyborg_video(
         self,
         intro_path: str,

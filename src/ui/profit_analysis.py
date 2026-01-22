@@ -11,8 +11,11 @@ from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent
 import config
 from workers.profit_worker import ExcelParserWorker, ProfitCalculator
 import logging
-import sqlite3
 from pathlib import Path
+
+# ORM Imports
+from db.core import SessionLocal
+from db.models import ProfitConfig, ProductHistory
 
 logger = logging.getLogger(__name__)
 
@@ -44,29 +47,28 @@ class ProfitAnalysisWidget(QWidget):
         self.commission = float(defaults["platform_commission"])
         self.fixed_fee = float(defaults["fixed_fee"])
 
+        session = SessionLocal()
         try:
-            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
-            with sqlite3.connect(db_path) as conn:
-                cur = conn.cursor()
-                cur.execute("CREATE TABLE IF NOT EXISTS profit_config (key TEXT PRIMARY KEY, value TEXT)")
-                cur.execute(
-                    "SELECT key, value FROM profit_config WHERE key IN (?, ?, ?, ?)",
-                    (
-                        "exchange_rate",
-                        "shipping_cost_per_kg",
-                        "platform_commission",
-                        "fixed_fee",
-                    ),
-                )
-                rows = cur.fetchall()
+            # Load from DB
+            configs = session.query(ProfitConfig).filter(
+                ProfitConfig.key.in_(defaults.keys())
+            ).all()
+            
+            config_map = {c.key: c.value for c in configs}
+            
+            if "exchange_rate" in config_map:
+                self.exchange_rate = float(config_map["exchange_rate"])
+            if "shipping_cost_per_kg" in config_map:
+                self.shipping_cost = float(config_map["shipping_cost_per_kg"])
+            if "platform_commission" in config_map:
+                self.commission = float(config_map["platform_commission"])
+            if "fixed_fee" in config_map:
+                self.fixed_fee = float(config_map["fixed_fee"])
 
-            values = {k: v for k, v in rows}
-            self.exchange_rate = float(values.get("exchange_rate", self.exchange_rate))
-            self.shipping_cost = float(values.get("shipping_cost_per_kg", self.shipping_cost))
-            self.commission = float(values.get("platform_commission", self.commission))
-            self.fixed_fee = float(values.get("fixed_fee", self.fixed_fee))
         except Exception as e:
             logger.warning(f"利润参数加载失败，已使用默认值: {e}")
+        finally:
+            session.close()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -433,21 +435,29 @@ class ProfitAnalysisWidget(QWidget):
             QMessageBox.information(self, "更新成功", "参数已更新，所有商品利润已重新计算。")
 
     def save_profit_params(self):
-        """保存参数到数据库"""
+        """保存参数到数据库 (ORM)"""
+        session = SessionLocal()
         try:
-            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
-            with sqlite3.connect(db_path) as conn:
-                cur = conn.cursor()
-                updates = [
-                    ("exchange_rate", str(self.exchange_rate)),
-                    ("shipping_cost_per_kg", str(self.shipping_cost)),
-                    ("platform_commission", str(self.commission)),
-                    ("fixed_fee", str(self.fixed_fee)),
-                ]
-                cur.executemany("INSERT OR REPLACE INTO profit_config (key, value) VALUES (?, ?)", updates)
-                conn.commit()
+            updates = {
+                "exchange_rate": str(self.exchange_rate),
+                "shipping_cost_per_kg": str(self.shipping_cost),
+                "platform_commission": str(self.commission),
+                "fixed_fee": str(self.fixed_fee),
+            }
+            
+            for key, val in updates.items():
+                # Merge: if exists update, else insert
+                # ProfitConfig has primary key 'key'
+                conf = ProfitConfig(key=key, value=val)
+                session.merge(conf)
+            
+            session.commit()
+            logger.info("Profit params saved to DB")
         except Exception as e:
+            session.rollback()
             logger.error(f"Save params failed: {e}")
+        finally:
+            session.close()
 
     def analyze_product_ai(self, title):
         """调用 AI 参谋 (DeepSeek)"""
@@ -494,83 +504,72 @@ class ProfitAnalysisWidget(QWidget):
             QMessageBox.critical(self, "分析失败", str(e))
 
     def load_history_from_db(self):
-        """从数据库加载历史选品数据"""
+        """从数据库加载历史选品数据 (ORM)"""
+        session = SessionLocal()
         try:
-            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
-            if not Path(db_path).exists():
-                return
-                
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
-                # 检查表是否存在
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='product_history'")
-                if not cursor.fetchone():
-                    return
-
-                # 读取最新的 500 条数据
-                cursor.execute("""
-                    SELECT title, tk_price, sales_count, cny_cost, weight, net_profit, source_file, image_url
-                    FROM product_history 
-                    ORDER BY created_at DESC 
-                    LIMIT 500
-                """)
-                rows = cursor.fetchall()
+            # 读取最新的 500 条数据
+            # SQLAlchemy 的 Model 字段是自动映射的
+            history_items = session.query(ProductHistory).order_by(ProductHistory.created_at.desc()).limit(500).all()
             
-            if not rows:
+            if not history_items:
                 return
 
             new_data = []
-            for r in rows:
+            for r in history_items:
                 new_data.append({
-                    "title": r[0],
-                    "tk_price": r[1],
-                    "sales": r[2], # Map DB sales_count to dict sales
-                    "cny_cost": r[3],
-                    "weight": r[4],
-                    "net_profit": r[5],
-                    "source_file": r[6],
-                    "image_url": r[7]
+                    "title": r.title,
+                    "tk_price": r.tk_price,
+                    "sales": r.sales_count,
+                    "cny_cost": r.cny_cost,
+                    "weight": r.weight,
+                    "net_profit": r.net_profit,
+                    "source_file": r.source_file,
+                    "image_url": r.image_url
                 })
             
             self.current_data = new_data
             self.populate_table()
-            self.lbl_status.setText(f"📂 已加载 {len(rows)} 条历史记录")
-            logger.info(f"[PROFIT] Loaded {len(rows)} history records from DB")
+            self.lbl_status.setText(f"📂 已加载 {len(history_items)} 条历史记录")
+            logger.info(f"[PROFIT] Loaded {len(history_items)} history records from DB")
 
         except Exception as e:
             logger.error(f"加载历史数据失败: {e}")
             self.lbl_status.setText(f"❌ 加载历史失败: {e}")
+        finally:
+            session.close()
 
     def save_to_database(self):
-        """保存当前数据到 SQLite"""
+        """保存当前数据到 SQLite (ORM)"""
         if not self.current_data:
             QMessageBox.warning(self, "无数据", "请先导入 Excel 数据")
             return
         
+        session = SessionLocal()
         try:
-            db_path = str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
-
-                saved_count = 0
-                for item in self.current_data:
-                    if item['net_profit'] > 0:  # 只保存有利润数据的行
-                        cursor.execute("""
-                            INSERT INTO product_history 
-                            (title, tk_price, sales_count, cny_cost, weight, net_profit, source_file, image_url)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            item['title'], item['tk_price'], item.get('sales', 0),
-                            item['cny_cost'], item['weight'], item['net_profit'],
-                            'excel_import', item.get('image_url', '')
-                        ))
-                        saved_count += 1
-
-                conn.commit()
+            saved_count = 0
+            for item in self.current_data:
+                if item['net_profit'] > 0:  # 只保存有利润数据的行
+                    history = ProductHistory(
+                        title=item['title'],
+                        tk_price=item['tk_price'],
+                        sales_count=item.get('sales', 0),
+                        cny_cost=item['cny_cost'],
+                        weight=item['weight'],
+                        net_profit=item['net_profit'],
+                        source_file='excel_import',
+                        image_url=item.get('image_url', '')
+                    )
+                    session.add(history)
+                    saved_count += 1
+            
+            session.commit()
             
             QMessageBox.information(self, "保存成功", f"已保存 {saved_count} 条有效数据到数据库")
             logger.info(f"[PROFIT] 保存了 {saved_count} 条选品数据")
             
         except Exception as e:
+            session.rollback()
             logger.error(f"保存数据失败: {e}")
             QMessageBox.critical(self, "保存失败", str(e))
+        finally:
+            session.close()

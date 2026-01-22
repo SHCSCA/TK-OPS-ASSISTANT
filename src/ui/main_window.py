@@ -18,7 +18,8 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QTimer
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
-from utils.lan_server import get_lan_server  # V2.0 新增
+from utils.lan_server import get_lan_server
+from utils.updater import UpdateChecker, AutoUpdater
 import importlib
 
 class LazyLoader(QWidget):
@@ -91,7 +92,31 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._check_ip_status()
         self._init_ip_timer()
+        
+        # V2.2: 检查更新
+        self._check_for_updates()
+        
         self.show()
+
+    def _check_for_updates(self):
+        """Startup update check"""
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    def _on_update_available(self, version, url, notes):
+        """Update found dialog"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("发现新版本")
+        msg.setText(f"检测到新版本 v{version}！\n\n更新内容：\n{notes}")
+        msg.setIcon(QMessageBox.Information)
+        btn_download = msg.addButton("去下载", QMessageBox.ActionRole)
+        msg.addButton("稍后", QMessageBox.RejectRole)
+        msg.exec_()
+        
+        if msg.clickedButton() == btn_download:
+            import webbrowser
+            webbrowser.open(url)
     
     def _run_migrations(self):
         """V2.0 启动时执行数据库迁移"""

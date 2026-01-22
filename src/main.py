@@ -10,6 +10,8 @@ import sys
 import traceback
 import logging
 
+# Telemetry
+from utils.telemetry import init_sentry
 
 def _ensure_single_sip_module() -> None:
     """确保 sip 只被加载一次。
@@ -173,6 +175,9 @@ def main():
 
 
 if __name__ == '__main__':
+    # Init Sentry ASAP
+    init_sentry()
+    
     # 全局异常捕获 (针对入口级错误)
     try:
         main()
