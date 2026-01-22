@@ -18,18 +18,56 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QTimer
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
-from ui.dashboard import DashboardPanel
-from ui.profit_analysis import ProfitAnalysisWidget  # V2.0 替代蓝海监测
-from ui.material_factory import MaterialFactoryPanel
-from ui.crm import CRMWidget  # V2.0 新增
-from ui.engagement import EngagementPanel  # V2.0 新增
-from ui.downloader import DownloaderPanel
-from ui.ai_content_factory import AIContentFactoryPanel, PhotoVideoPanel
-from ui.visual_lab import VisualLabPanel
-from ui.diagnostics import DiagnosticsPanel
-from ui.settings import SettingsPanel
-from ui.lan_airdrop import LanAirdropPanel
 from utils.lan_server import get_lan_server  # V2.0 新增
+import importlib
+
+class LazyLoader(QWidget):
+    """
+    延迟加载容器
+    仅当被显示(ensure_loaded)时才实例化真正的业务 Panel，大幅提升启动速度。
+    """
+    def __init__(self, factory_func):
+        super().__init__()
+        self.factory = factory_func
+        self.real_widget = None
+        # 使用布局填充
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        
+    def ensure_loaded(self):
+        if self.real_widget:
+            return self.real_widget
+            
+        # 实例化真正的业务组件
+        try:
+            self.real_widget = self.factory()
+            self._layout.addWidget(self.real_widget)
+        except Exception as e:
+            # 容错显示
+            err_label = QLabel(f"模块加载失败:\n{e}")
+            err_label.setAlignment(Qt.AlignCenter)
+            self._layout.addWidget(err_label)
+            import logging
+            logging.error(f"LazyLoader failed: {e}", exc_info=True)
+            
+        return self.real_widget
+
+    def shutdown(self):
+        """代理关闭事件"""
+        if self.real_widget and hasattr(self.real_widget, "shutdown"):
+            self.real_widget.shutdown()
+
+    @property
+    def worker(self):
+        """代理 worker 属性（用于 closeEvent 清理）"""
+        if self.real_widget and hasattr(self.real_widget, "worker"):
+            return self.real_widget.worker
+        return None
+
+    def refresh(self):
+        """代理 refresh 方法"""
+        if self.real_widget and hasattr(self.real_widget, "refresh"):
+            self.real_widget.refresh()
 
 
 class MainWindow(QMainWindow):
@@ -88,35 +126,47 @@ class MainWindow(QMainWindow):
         default_row = getattr(self, "first_selectable_row", 1)
         self.nav_list.setCurrentRow(default_row)
 
-    def _init_content_stack(self) -> None:
-        """初始化右侧内容栈，顺序需与导航同步"""
-        self.dashboard_panel = DashboardPanel(parent_nav_callback=self._switch_via_dashboard)
-        self.profit_panel = ProfitAnalysisWidget()  # V2.0 替代蓝海监测
-        self.material_factory_panel = MaterialFactoryPanel()
-        self.crm_panel = CRMWidget()  # V2.0 新增
-        self.engagement_panel = EngagementPanel() # V2.0 新增
-        self.downloader_panel = DownloaderPanel()
-        self.ai_content_factory_panel = AIContentFactoryPanel(enable_photo=False)
-        self.photo_video_panel = PhotoVideoPanel()
-        self.visual_lab_panel = VisualLabPanel()
-        self.lan_airdrop_panel = LanAirdropPanel()
-        self.diagnostics_panel = DiagnosticsPanel()
-        self.settings_panel = SettingsPanel()
+    def _create_lazy(self, module_path, class_name, **kwargs):
+        """Helper to create a lazy loaded panel"""
+        def factory():
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name)
+            return cls(**kwargs)
+        return LazyLoader(factory)
 
-        for panel in [
-            self.dashboard_panel,
-            self.profit_panel,
-            self.material_factory_panel,
-            self.crm_panel,
-            self.engagement_panel,  # Integrated EngagementPanel
-            self.downloader_panel,
-            self.ai_content_factory_panel,
-            self.photo_video_panel,
-            self.visual_lab_panel,
-            self.lan_airdrop_panel,
-            self.diagnostics_panel,
-            self.settings_panel,
-        ]:
+    def _init_content_stack(self) -> None:
+        """初始化右侧内容栈 (Lazy Loading Mode)"""
+        # 定义各模块工厂
+        self.dashboard_panel = self._create_lazy("ui.dashboard", "DashboardPanel", parent_nav_callback=self._switch_via_dashboard)
+        self.profit_panel = self._create_lazy("ui.profit_analysis", "ProfitAnalysisWidget")
+        self.material_factory_panel = self._create_lazy("ui.material_factory", "MaterialFactoryPanel")
+        self.crm_panel = self._create_lazy("ui.crm", "CRMWidget")
+        self.engagement_panel = self._create_lazy("ui.engagement", "EngagementPanel")
+        self.downloader_panel = self._create_lazy("ui.downloader", "DownloaderPanel")
+        self.ai_content_factory_panel = self._create_lazy("ui.ai_content_factory", "AIContentFactoryPanel", enable_photo=False)
+        self.photo_video_panel = self._create_lazy("ui.ai_content_factory", "PhotoVideoPanel")
+        self.visual_lab_panel = self._create_lazy("ui.visual_lab", "VisualLabPanel")
+        self.lan_airdrop_panel = self._create_lazy("ui.lan_airdrop", "LanAirdropPanel")
+        self.diagnostics_panel = self._create_lazy("ui.diagnostics", "DiagnosticsPanel")
+        self.settings_panel = self._create_lazy("ui.settings", "SettingsPanel")
+
+        # 顺序必须严格对应 Navigation Index [0..11]
+        self.panels_ordered = [
+            self.dashboard_panel,           # 0
+            self.profit_panel,              # 1
+            self.material_factory_panel,    # 2
+            self.crm_panel,                 # 3
+            self.engagement_panel,          # 4
+            self.downloader_panel,          # 5
+            self.ai_content_factory_panel,  # 6
+            self.photo_video_panel,         # 7
+            self.visual_lab_panel,          # 8
+            self.lan_airdrop_panel,         # 9
+            self.diagnostics_panel,         # 10
+            self.settings_panel             # 11
+        ]
+
+        for panel in self.panels_ordered:
             self.stacked_widget.addWidget(panel)
             
     def _switch_via_dashboard(self, index: int):
@@ -249,6 +299,12 @@ class MainWindow(QMainWindow):
             return
             
         index = int(page_idx)
+        
+        # 触发延迟加载
+        widget = self.stacked_widget.widget(index)
+        if isinstance(widget, LazyLoader):
+            widget.ensure_loaded()
+
         self.stacked_widget.setCurrentIndex(index)
         
         # Dashboard auto refresh happens on init, but we could trigger it again
@@ -256,9 +312,9 @@ class MainWindow(QMainWindow):
              # self.dashboard_panel._refresh_ip_status() # Optional: auto refresh whenever creating
              pass
 
-        # 局域网空投：每次进入刷新目录/二维码
+        # 局域网空投 (Index=9)：每次进入刷新目录/二维码
         try:
-            if getattr(self, "lan_airdrop_panel", None) and index == 8:
+            if getattr(self, "lan_airdrop_panel", None) and index == 9:
                 self.lan_airdrop_panel.refresh()
         except Exception:
             pass

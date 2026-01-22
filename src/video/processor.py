@@ -248,6 +248,27 @@ class VideoProcessor:
         except Exception as e:
             return False, f"素材清洗异常: {e}"
 
+    def _get_duration(self, video_path: str) -> float:
+        """获取视频时长（秒）。"""
+        try:
+            ffprobe = shutil.which("ffprobe")
+            if not ffprobe:
+                return 0.0
+            cmd = [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(Path(video_path).resolve()),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            return float(proc.stdout.strip())
+        except Exception:
+            return 0.0
+
     def process_video(
         self,
         input_path: str,
@@ -263,7 +284,7 @@ class VideoProcessor:
         custom_output_dir: str = None,
     ) -> Tuple[bool, str]:
         """
-        对视频进行去重处理 (剪辑/加速/翻转)
+        对视频进行去重处理 (全流程 FFmpeg 实现，极大提升性能)
         
         参数:
             input_path: 输入文件路径
@@ -272,10 +293,182 @@ class VideoProcessor:
             trim_tail: 去片尾秒数
             speed: 加速倍率 (1.1 = 1.1倍速)
             apply_flip: 是否水平翻转
+            micro_zoom: 是否应用微缩放裁剪 (1.02x)
+            add_noise: 是否添加噪点 (抗指纹)
+            strip_metadata: 是否清除元数据
             custom_output_dir: 自定义输出目录
             
         返回:
-            (是否成功, 消息提示)
+            (是否成功, 消息提示/输出路径)
+        """
+        try:
+            ffmpeg = self._find_ffmpeg()
+            if not ffmpeg:
+                return False, "未检测到 ffmpeg，请确保系统路径或 venv 中包含 ffmpeg。"
+
+            input_file = Path(input_path)
+            if not input_file.exists():
+                return False, f"未找到输入文件: {input_path}"
+
+            # 动态默认值
+            trim_head = float(trim_head if trim_head is not None else getattr(config, "VIDEO_TRIM_HEAD", 0.5))
+            trim_tail = float(trim_tail if trim_tail is not None else getattr(config, "VIDEO_TRIM_TAIL", 0.5))
+            speed = float(speed if speed is not None else getattr(config, "VIDEO_SPEED_MULTIPLIER", 1.1))
+
+            # Generate output path
+            if output_path is None:
+                stem = input_file.stem
+                suffix = input_file.suffix
+                output_suffix = getattr(config, "VIDEO_OUTPUT_SUFFIX", "_processed")
+                output_filename = f"{stem}{output_suffix}{suffix}"
+                
+                if custom_output_dir:
+                    out_dir = Path(custom_output_dir)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    output_path_obj = out_dir / output_filename
+                else:
+                    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                    output_path_obj = config.OUTPUT_DIR / output_filename
+            else:
+                output_path_obj = Path(output_path)
+                output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+            logger_msg = f"开始 FFmpeg 处理: {input_file.name} (Speed={speed}, Trim={trim_head}/{trim_tail})"
+            print(f"[FFmpeg] {logger_msg}") # Console feedback
+
+            # 构建 Filter Chain
+            filters = []
+
+            # 1. 剪辑 (Trim) - 优选此时长计算
+            duration = self._get_duration(str(input_file))
+            if duration > 0:
+                end_time = max(0.0, duration - trim_tail)
+                # 使用 trim 滤镜比 -ss 更精确控制流
+                # 视频 trim
+                filters.append(f"trim=start={trim_head}:end={end_time},setpts=PTS-STARTPTS")
+                # 音频 trim (必须同步)
+                # 注意：如果下面用了 filter_complex，音频也需要处理
+            else:
+                # 无法获取时长，仅去头
+                filters.append(f"trim=start={trim_head},setpts=PTS-STARTPTS")
+
+            # 2. 变速 (Speed)
+            if deep_remix_enabled:
+                # 非线性心跳变速
+                speed_min = 0.9
+                speed_max = 1.1
+                period = 4.0
+                amp = (speed_max - speed_min) / 2.0
+                # 叠加基础倍速 speed (如果 speed=1.1, 则整体快一点)
+                # filters.append(f"setpts=PTS/({speed}*(1+{amp}*sin(2*PI*t/{period})))") 
+                # 简化：仅使用非线性，忽略线性 speed 参数，或者将 linear speed 乘进去
+                filters.append(f"setpts=PTS/(1+{amp}*sin(2*PI*t/{period}))")
+            elif abs(speed - 1.0) > 0.01:
+                filters.append(f"setpts=PTS/{speed}")
+                
+            # 3. 翻转 (Flip)
+            if apply_flip:
+                filters.append("hflip")
+
+            # 4. 微缩放 (Zoom & Crop) / 像素位移
+            if deep_remix_enabled:
+                # 随机位移
+                shift_x = random.choice([-2, 2])
+                filters.append(f"scale=iw*1.02:ih*1.02,crop=iw:ih:{shift_x}:0")
+                
+                # 色彩微调
+                gamma = round(random.uniform(0.97, 1.03), 3)
+                sat = round(random.uniform(0.97, 1.03), 3)
+                filters.append(f"eq=gamma={gamma}:saturation={sat}")
+            elif micro_zoom:
+                # 放大 3% 然后居中裁剪回原尺寸，能够破坏原有指纹
+                filters.append("scale=iw*1.03:ih*1.03,crop=iw/1.03:ih/1.03")
+
+            # 5. 噪点 (Noise)
+
+            # 5. 噪点 (Noise)
+            if add_noise:
+                filters.append("noise=alls=5:allf=t+u")
+
+            vf_string = ",".join(filters)
+            
+            # 音频滤镜 (Audio Filters)
+            af_filters = []
+            if duration > 0:
+                 actual_end = max(0.0, duration - trim_tail)
+                 af_filters.append(f"atrim=start={trim_head}:end={actual_end},asetpts=PTS-STARTPTS")
+            else:
+                 af_filters.append(f"atrim=start={trim_head},asetpts=PTS-STARTPTS")
+
+            if abs(speed - 1.0) > 0.01:
+                af_filters.append(f"atempo={speed}")
+
+            af_string = ",".join(af_filters)
+
+            cmd = [
+                ffmpeg,
+                "-y",  # 覆盖输出
+                "-i", str(input_file),
+                "-filter_complex", f"[0:v]{vf_string}[v];[0:a]{af_string}[a]",
+                "-map", "[v]",
+                "-map", "[a]",
+                "-c:v", "libx264",
+                "-preset", "veryfast", # 速度优先
+                "-crf", "23",          # 平衡画质
+                "-c:a", "aac",
+                str(output_path_obj)
+            ]
+            
+            if strip_metadata:
+                cmd.extend(["-map_metadata", "-1"])
+
+            ok, err = self._run_ffmpeg(cmd)
+            
+            if ok:
+                self.processed_count += 1
+                return True, str(output_path_obj)
+            else:
+                # Fallback check: 如果是因为没有音频流导致 map [a] 失败?
+                # 简单重试无音频模式
+                if "Stream map '0:a' matches no streams" in err:
+                     cmd = [
+                        ffmpeg, "-y", "-i", str(input_file),
+                        "-vf", vf_string,
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                        str(output_path_obj)
+                     ]
+                     ok2, err2 = self._run_ffmpeg(cmd)
+                     if ok2:
+                         self.processed_count += 1
+                         return True, str(output_path_obj)
+                     else:
+                         self.failed_count += 1
+                         return False, f"FFmpeg Error (Retry): {err2}"
+                
+                self.failed_count += 1
+                return False, f"FFmpeg Error: {err}"
+
+        except Exception as e:
+            self.failed_count += 1
+            return False, f"处理异常: {e}"
+
+    def process_video_legacy(
+        self,
+        input_path: str,
+        output_path: str = None,
+        trim_head: float | None = None,
+        trim_tail: float | None = None,
+        speed: float | None = None,
+        apply_flip: bool = True,
+        deep_remix_enabled: bool = False,
+        micro_zoom: bool = True,
+        add_noise: bool = False,
+        strip_metadata: bool = True,
+        custom_output_dir: str = None,
+    ) -> Tuple[bool, str]:
+        """
+        [DEPRECATED] 对视频进行去重处理 (Original MoviePy Implementation)
+        保留此方法作为备用 fallback。
         """
         try:
             VideoFileClip, vfx = self._lazy_moviepy()

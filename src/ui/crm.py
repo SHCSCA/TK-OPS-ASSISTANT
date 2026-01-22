@@ -28,6 +28,8 @@ import logging
 from pathlib import Path
 
 import config
+from db.core import get_db, SessionLocal
+from db.models import Account, Comment, DMTask
 from api.ai_assistant import analyze_comment_lead
 
 logger = logging.getLogger(__name__)
@@ -39,12 +41,6 @@ STATUS_LABELS = {
     "suspended": "封禁",
 }
 
-
-def _db_path() -> str:
-    try:
-        return str(getattr(config, "ASSET_LIBRARY_DIR", Path("AssetLibrary")) / "assets.db")
-    except Exception:
-        return "AssetLibrary/assets.db"
 
 class AccountItemWidget(QWidget):
     """自定义列表项：展示账号状态和操作"""
@@ -128,17 +124,22 @@ class AccountItemWidget(QWidget):
             pass
 
     def on_checkin(self):
-        """打卡操作"""
+        """打卡操作 (ORM)"""
         try:
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            with sqlite3.connect(_db_path()) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE accounts 
-                    SET last_post_date = ?, today_post_count = today_post_count + 1
-                    WHERE id = ?
-                """, (now_str, self.account['id']))
-                conn.commit()
+            now = datetime.now()
+            now_str = now.strftime("%Y-%m-%d %H:%M")
+            session = SessionLocal()
+            try:
+                acc = session.query(Account).get(int(self.account['id']))
+                if acc:
+                    acc.last_post_date = now
+                    acc.today_post_count = (acc.today_post_count or 0) + 1
+                    session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
             
             # 更新 UI
             status_text = STATUS_LABELS.get(self.account.get("status", "active"), "未知")
@@ -291,63 +292,45 @@ class CRMWidget(QWidget):
     def load_accounts(self):
         """从数据库加载账号列表"""
         try:
-            dbp = _db_path()
-            logger.info(f"[CRM] 使用数据库：{dbp}")
+            logger.info("[CRM] 正在连接数据库(ORM)...")
             
-            if not Path(dbp).exists():
-                logger.warning(f"[CRM] 数据库文件不存在: {dbp}")
-                return
-
-            logger.info("[CRM] 正在连接数据库(设置超时5秒)...")
-            # 增加 timeout 参数，防止死锁无限等待
-            with sqlite3.connect(dbp, timeout=5.0) as conn:
-                logger.info("[CRM] API: 连接建立，准备查询...")
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, username, status, proxy_ip, last_post_date, notes
-                    FROM accounts
-                    ORDER BY created_at DESC
-                    """
-                )
-                accounts = cursor.fetchall()
+            session = SessionLocal()
+            try:
+                accounts = session.query(Account).order_by(Account.created_at.desc()).all()
                 logger.info(f"[CRM] 查询成功，获取到 {len(accounts)} 个账号")
-            
-            self.list_widget.clear()
-            if not accounts:
-                # 显示空状态提示
-                item = QListWidgetItem("暂无账号，点击右上角【添加账号】开始管理")
-                item.setFlags(Qt.NoItemFlags)
-                self.list_widget.addItem(item)
-                return
-            
-            logger.info("[CRM] 正在渲染列表...")
-            # self.list_widget.setUpdatesEnabled(False) # 移除去除优化，排查卡顿
-            for i, acc_data in enumerate(accounts):
-                # logger.debug(f"[CRM] 渲染第 {i+1} 个账号") 
-                acc_dict = {
-                    'id': acc_data[0],
-                    'username': acc_data[1],
-                    'status': acc_data[2],
-                    'proxy_ip': acc_data[3],
-                    'last_post_date': acc_data[4] or '从未发布',
-                    'notes': acc_data[5]
-                }
                 
-                item = QListWidgetItem(self.list_widget)
-                item.setSizeHint(QSize(0, 86))
-                item.setData(Qt.UserRole, int(acc_dict["id"]))
-                widget = AccountItemWidget(acc_dict, self)
-                self.list_widget.setItemWidget(item, widget)
-            # self.list_widget.setUpdatesEnabled(True)
-            logger.info("[CRM] 列表渲染完成")
+                self.list_widget.clear()
+                if not accounts:
+                    # 显示空状态提示
+                    item = QListWidgetItem("暂无账号，点击右上角【添加账号】开始管理")
+                    item.setFlags(Qt.NoItemFlags)
+                    self.list_widget.addItem(item)
+                    return
+                
+                logger.info("[CRM] 正在渲染列表...")
+                for i, acc in enumerate(accounts):
+                    acc_dict = {
+                        'id': acc.id,
+                        'username': acc.username,
+                        'status': acc.status,
+                        'proxy_ip': acc.proxy_ip,
+                        'last_post_date': str(acc.last_post_date) if acc.last_post_date else '从未发布',
+                        'notes': acc.notes
+                    }
+                    
+                    item = QListWidgetItem(self.list_widget)
+                    item.setSizeHint(QSize(0, 86))
+                    item.setData(Qt.UserRole, int(acc_dict["id"]))
+                    widget = AccountItemWidget(acc_dict, self)
+                    self.list_widget.setItemWidget(item, widget)
+                logger.info("[CRM] 列表渲染完成")
+                self._on_selection_changed()
 
-            self._on_selection_changed()
-            logger.info("[CRM] load_accounts 函数执行结束")
-                
+            finally:
+                session.close()
+
         except Exception as e:
             logger.error(f"加载账号失败: {e}")
-            # QMessageBox.critical(self, "加载失败", f"无法加载账号列表:\n{e}")
 
     def _init_comment_monitor(self) -> None:
         """初始化评论监控定时器。"""
@@ -368,32 +351,28 @@ class CRMWidget(QWidget):
     def _poll_comments(self) -> None:
         """轮询最新评论并进行意向分级。"""
         try:
-            dbp = _db_path()
-            with sqlite3.connect(dbp) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, author, content, created_at
-                    FROM comments
-                    WHERE id > ?
-                    ORDER BY id ASC
-                    LIMIT 50
-                    """,
-                    (self._last_comment_id,)
-                )
-                rows = cursor.fetchall()
+            rows = []
+            session = SessionLocal()
+            try:
+                rows = session.query(Comment).filter(Comment.id > self._last_comment_id).order_by(Comment.id.asc()).limit(50).all()
+            finally:
+                session.close()
 
             if not rows:
                 return
 
             for row in rows:
-                cid, author, content, created_at = row
+                cid = row.id
+                author = row.author
+                content = row.content
+                created_at = row.created_at
+                
                 analysis = analyze_comment_lead(content or "")
                 lead_tier = int(analysis.get("lead_tier", 3))
                 reply = str(analysis.get("reply", "") or "")
 
                 self._update_comment_tier(cid, lead_tier)
-                self._append_comment_alert(author, content, created_at, lead_tier, reply)
+                self._append_comment_alert(author, content, str(created_at), lead_tier, reply)
                 if lead_tier == 1:
                     self._enqueue_dm_task(cid, reply)
                 self._last_comment_id = max(self._last_comment_id, int(cid))
@@ -403,14 +382,16 @@ class CRMWidget(QWidget):
     def _update_comment_tier(self, comment_id: int, lead_tier: int) -> None:
         """更新评论意向等级。"""
         try:
-            dbp = _db_path()
-            with sqlite3.connect(dbp) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE comments SET lead_tier = ? WHERE id = ?",
-                    (int(lead_tier), int(comment_id)),
-                )
-                conn.commit()
+            session = SessionLocal()
+            try:
+                c = session.query(Comment).get(comment_id)
+                if c:
+                    c.lead_tier = lead_tier
+                    session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
         except Exception:
             pass
 
@@ -435,18 +416,19 @@ class CRMWidget(QWidget):
         try:
             if not bool(getattr(config, "COMMENT_DM_ENABLED", True)):
                 return
-            dbp = _db_path()
-            with sqlite3.connect(dbp) as conn:
-                cursor = conn.cursor()
-                self._ensure_dm_tasks_table(cursor)
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO dm_tasks (comment_id, status, message)
-                    VALUES (?, 'pending', ?)
-                    """,
-                    (int(comment_id), (reply or getattr(config, "COMMENT_DM_TEMPLATE", "")).strip()),
-                )
-                conn.commit()
+            session = SessionLocal()
+            try:
+                msg = (reply or getattr(config, "COMMENT_DM_TEMPLATE", "")).strip()
+                # 检查是否存在
+                exists = session.query(DMTask).filter_by(comment_id=comment_id).first()
+                if not exists:
+                    task = DMTask(comment_id=comment_id, status='pending', message=msg)
+                    session.add(task)
+                    session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
             self._load_dm_tasks()
         except Exception as e:
             logger.error(f"创建私信任务失败: {e}")
@@ -455,22 +437,20 @@ class CRMWidget(QWidget):
         """加载私信任务列表。"""
         try:
             self.dm_list.clear()
-            dbp = _db_path()
-            with sqlite3.connect(dbp) as conn:
-                cursor = conn.cursor()
-                self._ensure_dm_tasks_table(cursor)
-                cursor.execute(
-                    """
-                    SELECT id, comment_id, status, message, created_at
-                    FROM dm_tasks
-                    ORDER BY created_at DESC
-                    LIMIT 100
-                    """
-                )
-                rows = cursor.fetchall()
+            session = SessionLocal()
+            try:
+                tasks = session.query(DMTask).order_by(DMTask.created_at.desc()).limit(100).all()
+                rows = tasks
+            finally:
+                session.close()
 
-            for row in rows:
-                tid, cid, status, message, created_at = row
+            for task in rows:
+                tid = task.id
+                cid = task.comment_id
+                status = task.status
+                message = task.message
+                created_at = task.created_at
+                
                 item = QListWidgetItem(f"#{tid} | 评论ID:{cid} | {status} | {message} | {created_at}")
                 item.setData(Qt.UserRole, int(tid))
                 if status == "pending":
@@ -486,37 +466,24 @@ class CRMWidget(QWidget):
             if not item:
                 return
             task_id = item.data(Qt.UserRole)
-            dbp = _db_path()
-            with sqlite3.connect(dbp) as conn:
-                cursor = conn.cursor()
-                self._ensure_dm_tasks_table(cursor)
-                cursor.execute(
-                    "UPDATE dm_tasks SET status='done', handled_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (int(task_id),),
-                )
-                conn.commit()
+            session = SessionLocal()
+            try:
+                task = session.query(DMTask).get(task_id)
+                if task:
+                    task.status = 'done'
+                    task.handled_at = datetime.now()
+                    session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
             self._load_dm_tasks()
         except Exception as e:
             logger.error(f"更新私信任务失败: {e}")
 
     def _ensure_dm_tasks_table(self, cursor) -> None:
-        """保证私信任务表存在（防止迁移未执行导致 UI 异常）。"""
-        try:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dm_tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    comment_id INTEGER UNIQUE,
-                    status TEXT DEFAULT 'pending',
-                    message TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    handled_at DATETIME
-                )
-                """
-            )
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dm_tasks_status ON dm_tasks(status)")
-        except Exception:
-            pass
+        """(Deprecated) ORM handles migrations via init_db or alemebic."""
+        pass
 
     def add_account_dialog(self):
         """打开添加账号对话框"""
@@ -530,20 +497,28 @@ class CRMWidget(QWidget):
                 return
             
             try:
-                with sqlite3.connect(_db_path()) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO accounts (username, status, proxy_ip, notes)
-                        VALUES (?, ?, ?, ?)
-                    """, (data['username'], data['status'], data['proxy_ip'], data['notes']))
-                    conn.commit()
-                
-                logger.info(f"[CRM] 新增账号: @{data['username']}")
+                session = SessionLocal()
+                try:
+                    new_acc = Account(
+                        username=data['username'],
+                        status=data['status'],
+                        proxy_ip=data['proxy_ip'],
+                        notes=data['notes'],
+                        created_at=datetime.now()
+                    )
+                    session.add(new_acc)
+                    session.commit()
+                    logger.info(f"[CRM] 新增账号: @{data['username']}")
+                except Exception:
+                    session.rollback()
+                    raise
+                finally:
+                    session.close()
+
                 self.load_accounts()
                 
-            except sqlite3.IntegrityError:
-                QMessageBox.warning(self, "重复账号", "该账号名已存在")
             except Exception as e:
+                # Catch integrity errors etc. from sqlalchemy
                 logger.error(f"添加账号失败: {e}")
                 QMessageBox.critical(self, "添加失败", str(e))
 
@@ -558,27 +533,21 @@ class CRMWidget(QWidget):
 
     def _fetch_account_by_id(self, account_id: int) -> dict | None:
         try:
-            with sqlite3.connect(_db_path()) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, username, status, proxy_ip, last_post_date, notes
-                    FROM accounts
-                    WHERE id = ?
-                    """,
-                    (account_id,),
-                )
-                row = cursor.fetchone()
-            if not row:
-                return None
-            return {
-                "id": row[0],
-                "username": row[1],
-                "status": row[2],
-                "proxy_ip": row[3],
-                "last_post_date": row[4] or "从未发布",
-                "notes": row[5] or "",
-            }
+            session = SessionLocal()
+            try:
+                acc = session.query(Account).get(account_id)
+                if not acc:
+                    return None
+                return {
+                    "id": acc.id,
+                    "username": acc.username,
+                    "status": acc.status,
+                    "proxy_ip": acc.proxy_ip,
+                    "last_post_date": str(acc.last_post_date) if acc.last_post_date else "从未发布",
+                    "notes": acc.notes or "",
+                }
+            finally:
+                session.close()
         except Exception:
             return None
 
@@ -615,24 +584,26 @@ class CRMWidget(QWidget):
             return
 
         try:
-            with sqlite3.connect(_db_path()) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE accounts
-                    SET username = ?, status = ?, proxy_ip = ?, notes = ?
-                    WHERE id = ?
-                    """,
-                    (data["username"], data["status"], data["proxy_ip"], data["notes"], account_id),
-                )
-                conn.commit()
-            logger.info(f"[CRM] 编辑账号: id={account_id} @{data['username']}")
+            session = SessionLocal()
+            try:
+                acc = session.query(Account).get(account_id)
+                if acc:
+                    acc.username = data["username"]
+                    acc.status = data["status"]
+                    acc.proxy_ip = data["proxy_ip"]
+                    acc.notes = data["notes"]
+                    session.commit()
+                    logger.info(f"[CRM] 编辑账号: id={account_id} @{data['username']}")
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
             self.load_accounts()
-        except sqlite3.IntegrityError:
-            QMessageBox.warning(self, "重复账号", "该账号名已存在")
         except Exception as e:
             logger.error(f"编辑账号失败: {e}")
-            QMessageBox.critical(self, "编辑失败", str(e))
+            QMessageBox.critical(self, "编辑失败", f"{e}") # simplified error
 
     def delete_selected_account(self):
         account_id = self._selected_account_id()
@@ -652,12 +623,22 @@ class CRMWidget(QWidget):
             return
 
         try:
-            with sqlite3.connect(_db_path()) as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-                conn.commit()
+            session = SessionLocal()
+            try:
+                acc_obj = session.query(Account).get(account_id)
+                if acc_obj:
+                    session.delete(acc_obj)
+                    session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
             logger.info(f"[CRM] 删除账号: id={account_id} @{uname}")
             self.load_accounts()
+        except Exception as e:
+             logger.error(f"删除账号失败: {e}")
         except Exception as e:
             logger.error(f"删除账号失败: {e}")
             QMessageBox.critical(self, "删除失败", str(e))

@@ -40,4 +40,7 @@ playwright==1.40.0      # 浏览器自动化
 # Testing
 pytest==7.4.0
 
+# Database
+SQLAlchemy>=2.0.0
+
 numpy==1.26.4
