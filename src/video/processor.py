@@ -7,6 +7,8 @@ import time
 import random
 import shutil
 import subprocess
+import os
+import tempfile
 import config
 
 
@@ -34,16 +36,96 @@ class VideoProcessor:
         """查找 ffmpeg 可执行文件路径（moviepy 依赖它，但环境可能不完整）。"""
         return shutil.which("ffmpeg")
 
+    def _run_cmd(self, args: list) -> subprocess.CompletedProcess:
+        """统一执行 subprocess 命令，处理编码和 Windows 窗口隐藏。"""
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            # startupinfo.wShowWindow = subprocess.SW_HIDE # 默认为0 (SW_HIDE)
+
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+
     def _run_ffmpeg(self, args: list) -> Tuple[bool, str]:
         """运行 ffmpeg（不抛异常，返回成功与错误信息）。"""
         try:
-            proc = subprocess.run(args, capture_output=True, text=True)
+            proc = self._run_cmd(args)
             if proc.returncode == 0:
                 return True, ""
             err = (proc.stderr or proc.stdout or "").strip()
             return False, err[-2000:] if err else "ffmpeg 执行失败（无输出）"
         except Exception as e:
             return False, str(e)
+
+    def _estimate_filter_complex_length(self, filter_complex: str) -> int:
+        """估算 filter_complex 字符串转化为 FFmpeg 命令行后的长度。
+        
+        粗略计算：命令行长度 = -filter_complex + 空格 + 引号 + 内容 + 其他参数
+        Windows CMD/PowerShell 限制：8191 字符
+        """
+        cmd_overhead = 500  # 其他参数的额外开销
+        return len(filter_complex) + cmd_overhead
+
+    def _run_ffmpeg_with_script(self, args: list, filter_complex: str) -> Tuple[bool, str]:
+        """如果 filter_complex 过长，使用临时脚本文件方式执行 FFmpeg。
+        
+        目的：绕过 Windows 8191 字符命令行限制。
+        
+        参数：
+            args: 基础 FFmpeg 命令参数
+            filter_complex: 过滤器链字符串
+        
+        返回：
+            (是否成功, 错误信息)
+        """
+        estimated_len = self._estimate_filter_complex_length(filter_complex)
+        
+        # Windows CMD 字符限制
+        CMD_LIMIT = 8191
+        
+        # 如果估算长度超过限制，使用脚本文件方式
+        if estimated_len > CMD_LIMIT - 200:  # 预留 200 字符缓冲
+            try:
+                # 创建临时脚本文件
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as script_file:
+                    script_file.write(filter_complex)
+                    script_path = script_file.name
+                
+                # 修改命令：将 -filter_complex 替换为 -filter_complex_script
+                new_args = []
+                i = 0
+                while i < len(args):
+                    if args[i] == '-filter_complex':
+                        # 跳过原始的 filter_complex 和它的值
+                        new_args.append('-filter_complex_script')
+                        new_args.append(script_path)
+                        i += 2  # 跳过 -filter_complex 和它的值
+                    else:
+                        new_args.append(args[i])
+                        i += 1
+                
+                ok, err = self._run_ffmpeg(new_args)
+                
+                # 清理临时文件
+                try:
+                    os.unlink(script_path)
+                except:
+                    pass
+                
+                return ok, err
+            except Exception as e:
+                return False, f"脚本模式执行失败: {str(e)}"
+        else:
+            # 命令行长度在限制内，直接执行
+            return self._run_ffmpeg(args)
 
     def _has_audio_stream(self, video_path: str) -> bool:
         """检测视频是否包含音轨（用于半人马拼接）。"""
@@ -63,7 +145,7 @@ class VideoProcessor:
                 "default=nw=1:nk=1",
                 str(Path(video_path).resolve()),
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = self._run_cmd(cmd)
             return (proc.stdout or "").strip() == "audio"
         except Exception:
             return True
@@ -81,7 +163,7 @@ class VideoProcessor:
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(audio_path)
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = self._run_cmd(cmd)
             return float(proc.stdout.strip())
         except Exception:
             return 0.0
@@ -240,10 +322,15 @@ class VideoProcessor:
             ])
 
             # 构造 filter_complex
+            # 修复：强制统一分辨率 (1080x1920) 并采用 "Crop-to-Fill" 模式
+            # force_original_aspect_ratio=increase: 确保画面覆盖全屏
+            # crop=1080:1920: 裁剪多余部分
+            scale_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
+            
             vf_parts = [
-                f"[0:v]trim=0:{intro_sec},setpts=PTS-STARTPTS[v0]",
-                "[1:v]setpts=PTS-STARTPTS[v1]",
-                f"[2:v]trim=0:{outro_sec},setpts=PTS-STARTPTS[v2]",
+                f"[0:v]trim=0:{intro_sec},{scale_filter},setpts=PTS-STARTPTS[v0]",
+                f"[1:v]{scale_filter},setpts=PTS-STARTPTS[v1]",
+                f"[2:v]trim=0:{outro_sec},{scale_filter},setpts=PTS-STARTPTS[v2]",
             ]
             af_parts = []
             if has_audio:
@@ -389,7 +476,7 @@ class VideoProcessor:
                 "default=noprint_wrappers=1:nokey=1",
                 str(Path(video_path).resolve()),
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = self._run_cmd(cmd)
             return float(proc.stdout.strip())
         except Exception:
             return 0.0
@@ -438,7 +525,7 @@ class VideoProcessor:
             # 动态默认值
             trim_head = float(trim_head if trim_head is not None else getattr(config, "VIDEO_TRIM_HEAD", 0.5))
             trim_tail = float(trim_tail if trim_tail is not None else getattr(config, "VIDEO_TRIM_TAIL", 0.5))
-            speed = float(speed if speed is not None else getattr(config, "VIDEO_SPEED_MULTIPLIER", 1.1))
+            speed = None
 
             # Generate output path
             if output_path is None:
@@ -458,83 +545,82 @@ class VideoProcessor:
                 output_path_obj = Path(output_path)
                 output_path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-            logger_msg = f"开始 FFmpeg 处理: {input_file.name} (Speed={speed}, Trim={trim_head}/{trim_tail})"
+            logger_msg = f"开始 FFmpeg 处理: {input_file.name} (Speed=rand 1.10-1.35/sec, Trim={trim_head}/{trim_tail})"
             print(f"[FFmpeg] {logger_msg}") # Console feedback
 
             # 构建 Filter Chain
-            filters = []
-
-            # 1. 剪辑 (Trim) - 优选此时长计算
             duration = self._get_duration(str(input_file))
-            if duration > 0:
-                end_time = max(0.0, duration - trim_tail)
-                # 使用 trim 滤镜比 -ss 更精确控制流
-                # 视频 trim
-                filters.append(f"trim=start={trim_head}:end={end_time},setpts=PTS-STARTPTS")
-                # 音频 trim (必须同步)
-                # 注意：如果下面用了 filter_complex，音频也需要处理
-            else:
-                # 无法获取时长，仅去头
-                filters.append(f"trim=start={trim_head},setpts=PTS-STARTPTS")
+            if duration <= 0:
+                return False, "无法获取视频时长，无法进行无级变速。"
 
-            # 2. 变速 (Speed)
-            if deep_remix_enabled:
-                # 非线性心跳变速
-                speed_min = 0.9
-                speed_max = 1.1
-                period = 4.0
-                amp = (speed_max - speed_min) / 2.0
-                # 叠加基础倍速 speed (如果 speed=1.1, 则整体快一点)
-                # filters.append(f"setpts=PTS/({speed}*(1+{amp}*sin(2*PI*t/{period})))") 
-                # 简化：仅使用非线性，忽略线性 speed 参数，或者将 linear speed 乘进去
-                filters.append(f"setpts=PTS/(1+{amp}*sin(2*PI*t/{period}))")
-            elif abs(speed - 1.0) > 0.01:
-                filters.append(f"setpts=PTS/{speed}")
-                
-            # 3. 翻转 (Flip)
+            # 计算有效区间
+            start_time = max(0.0, trim_head)
+            end_time = max(0.0, duration - trim_tail)
+            if end_time <= start_time:
+                return False, "去头去尾后无有效时长。"
+
+            speed_min = 1.10
+            speed_max = 1.35
+
+            v_segments = []
+            a_segments = []
+            speeds = []
+            t = start_time
+            seg_idx = 0
+            while t < end_time - 1e-6:
+                seg_end = min(t + 1.0, end_time)
+                s = round(random.uniform(speed_min, speed_max), 3)
+                speeds.append(s)
+                v_segments.append(
+                    f"[0:v]trim=start={t}:end={seg_end},setpts=PTS-STARTPTS,setpts=PTS/{s}[v{seg_idx}]"
+                )
+                a_segments.append(
+                    f"[0:a]atrim=start={t}:end={seg_end},asetpts=PTS-STARTPTS,atempo={s}[a{seg_idx}]"
+                )
+                seg_idx += 1
+                t = seg_end
+
+            # 额外视频效果（拼接后统一处理）
+            post_vf = []
             if apply_flip:
-                filters.append("hflip")
-
-            # 4. 微缩放 (Zoom & Crop) / 像素位移
+                post_vf.append("hflip")
             if deep_remix_enabled:
-                # 随机位移
                 shift_x = random.choice([-2, 2])
-                filters.append(f"scale=iw*1.02:ih*1.02,crop=iw:ih:{shift_x}:0")
-                
-                # 色彩微调
+                post_vf.append(f"scale=iw*1.02:ih*1.02,crop=iw:ih:{shift_x}:0")
                 gamma = round(random.uniform(0.97, 1.03), 3)
                 sat = round(random.uniform(0.97, 1.03), 3)
-                filters.append(f"eq=gamma={gamma}:saturation={sat}")
+                post_vf.append(f"eq=gamma={gamma}:saturation={sat}")
             elif micro_zoom:
-                # 放大 3% 然后居中裁剪回原尺寸，能够破坏原有指纹
-                filters.append("scale=iw*1.03:ih*1.03,crop=iw/1.03:ih/1.03")
-
-            # 5. 噪点 (Noise)
-
-            # 5. 噪点 (Noise)
+                post_vf.append("scale=iw*1.03:ih*1.03,crop=iw/1.03:ih/1.03")
             if add_noise:
-                filters.append("noise=alls=5:allf=t+u")
+                post_vf.append("noise=alls=5:allf=t+u")
 
-            vf_string = ",".join(filters)
-            
-            # 音频滤镜 (Audio Filters)
-            af_filters = []
-            if duration > 0:
-                 actual_end = max(0.0, duration - trim_tail)
-                 af_filters.append(f"atrim=start={trim_head}:end={actual_end},asetpts=PTS-STARTPTS")
+            concat_inputs = "".join([f"[v{i}][a{i}]" for i in range(seg_idx)])
+            concat_filter = f"{concat_inputs}concat=n={seg_idx}:v=1:a=1[v0][a0]"
+
+            if post_vf:
+                post_vf_str = ",".join(post_vf)
+                v_out = f"[v0]{post_vf_str}[v]"
             else:
-                 af_filters.append(f"atrim=start={trim_head},asetpts=PTS-STARTPTS")
+                v_out = "[v0]null[v]"
+            a_out = "[a0]anull[a]"
 
-            if abs(speed - 1.0) > 0.01:
-                af_filters.append(f"atempo={speed}")
+            filter_complex_av = ";".join(v_segments + a_segments + [concat_filter, v_out, a_out])
 
-            af_string = ",".join(af_filters)
+            # 无音频 fallback 的 filter_complex
+            concat_v_inputs = "".join([f"[v{i}]" for i in range(seg_idx)])
+            concat_v = f"{concat_v_inputs}concat=n={seg_idx}:v=1:a=0[v0]"
+            if post_vf:
+                v_only = f"[v0]{post_vf_str}[v]"
+            else:
+                v_only = "[v0]null[v]"
+            filter_complex_v = ";".join(v_segments + [concat_v, v_only])
 
             cmd = [
                 ffmpeg,
                 "-y",  # 覆盖输出
                 "-i", str(input_file),
-                "-filter_complex", f"[0:v]{vf_string}[v];[0:a]{af_string}[a]",
+                "-filter_complex", filter_complex_av,
                 "-map", "[v]",
                 "-map", "[a]",
                 "-c:v", "libx264",
@@ -547,7 +633,8 @@ class VideoProcessor:
             if strip_metadata:
                 cmd.extend(["-map_metadata", "-1"])
 
-            ok, err = self._run_ffmpeg(cmd)
+            # 使用脚本方式运行 FFmpeg（如果 filter_complex 过长）
+            ok, err = self._run_ffmpeg_with_script(cmd, filter_complex_av)
             
             if ok:
                 self.processed_count += 1
@@ -556,19 +643,20 @@ class VideoProcessor:
                 # Fallback check: 如果是因为没有音频流导致 map [a] 失败?
                 # 简单重试无音频模式
                 if "Stream map '0:a' matches no streams" in err:
-                     cmd = [
+                    cmd = [
                         ffmpeg, "-y", "-i", str(input_file),
-                        "-vf", vf_string,
+                        "-filter_complex", filter_complex_v,
+                        "-map", "[v]",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                         str(output_path_obj)
-                     ]
-                     ok2, err2 = self._run_ffmpeg(cmd)
-                     if ok2:
-                         self.processed_count += 1
-                         return True, str(output_path_obj)
-                     else:
-                         self.failed_count += 1
-                         return False, f"FFmpeg Error (Retry): {err2}"
+                    ]
+                    ok2, err2 = self._run_ffmpeg_with_script(cmd, filter_complex_v)
+                    if ok2:
+                        self.processed_count += 1
+                        return True, str(output_path_obj)
+                    else:
+                        self.failed_count += 1
+                        return False, f"FFmpeg Error (Retry): {err2}"
                 
                 self.failed_count += 1
                 return False, f"FFmpeg Error: {err}"

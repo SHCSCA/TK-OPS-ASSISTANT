@@ -9,9 +9,12 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent
 import config
-from workers.profit_worker import ExcelParserWorker, ProfitCalculator
+from workers.profit_worker import ExcelParserWorker, ProfitCalculator, AIAnalysisWorker
 import logging
 from pathlib import Path
+import webbrowser
+import urllib.parse
+from ui.toast import Toast
 
 # ORM Imports
 from db.core import SessionLocal
@@ -28,6 +31,7 @@ class ProfitAnalysisWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.current_data = []
+        self.ai_workers = {} # Keep references to avoid GC
         self.load_profit_params()
         self.init_ui()
         # 启动时自动加载历史数据
@@ -132,7 +136,7 @@ class ProfitAnalysisWidget(QWidget):
             self.table.setColumnWidth(i, 100)
         
         # 增加操作列宽度，确保按钮不被遮挡
-        self.table.setColumnWidth(7, 35) 
+        self.table.setColumnWidth(7, 120) 
         
         self.table.verticalHeader().setDefaultSectionSize(38) # Ensure comfortable row height
         self.table.setAlternatingRowColors(True)
@@ -232,29 +236,34 @@ class ProfitAnalysisWidget(QWidget):
             # 操作按钮 (Use cell widget for real buttons)
             btn_container = QWidget()
             btn_layout = QHBoxLayout(btn_container)
-            btn_layout.setContentsMargins(0, 0, 0, 0) # Maximize space usage
-            btn_layout.setSpacing(0)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
             
+            # 1. AI 分析按钮
+            btn_ai = QPushButton("🤖")
+            btn_ai.setToolTip("AI 选品参谋")
+            btn_ai.setFixedSize(28, 24)
+            btn_ai.setProperty("class", "table-action-btn")
+            btn_ai.clicked.connect(self.on_ai_analyze_clicked)
+            btn_layout.addWidget(btn_ai)
+            
+            # 2. 1688 搜同款按钮
+            btn_search = QPushButton("🔍")
+            btn_search.setToolTip("在 1688 搜索同款")
+            btn_search.setFixedSize(28, 24)
+            btn_search.setProperty("class", "table-action-btn")
+            btn_search.clicked.connect(self.on_search_clicked)
+            btn_layout.addWidget(btn_search)
+            
+            # 3. 删除按钮
             btn_del = QPushButton("➖")
             btn_del.setToolTip("删除此行")
-            # 移除硬编码尺寸，改用 QSS 控制 (Global Theme)
-            # btn_del.setFixedSize(24, 20) 
+            btn_del.setFixedSize(28, 24)
             btn_del.setProperty("class", "table-action-btn")
             btn_del.setProperty("variant", "danger") 
-            
-            # Use closure to capture current row reference logic if needed, 
-            # but usually row index changes on deletion. 
-            # Better to store row id or use `indexAt` in slot.
-            btn_del.clicked.connect(lambda _, r=row_idx: self.delete_row(r))
-            
-            # Re-bind is tricky with lambdas if rows shift. 
-            # A cleaner way is using `sender()` and `indexAt`.
-            # We will use a standard method instead of lambda for safety.
-            btn_del.clicked.disconnect()
             btn_del.clicked.connect(self.on_delete_clicked)
-            
-            # Align center
             btn_layout.addWidget(btn_del)
+            
             btn_layout.setAlignment(Qt.AlignCenter) 
             self.table.setCellWidget(row_idx, 7, btn_container)
 
@@ -262,6 +271,66 @@ class ProfitAnalysisWidget(QWidget):
             self.calculate_row_profit(row_idx)
 
         self.table.blockSignals(False)
+
+    def on_ai_analyze_clicked(self):
+        """Handle AI Analyze button click"""
+        btn = self.sender()
+        if not btn: return
+        pos = btn.parent().mapToGlobal(btn.pos())
+        pos_in_table = self.table.viewport().mapFromGlobal(pos)
+        row = self.table.rowAt(pos_in_table.y())
+        if row >= 0:
+            item = self.current_data[row]
+            self.start_ai_worker(item['title'], item.get('tk_price', 0), item.get('sales', 0))
+
+    def on_search_clicked(self):
+        """Handle 1688 Search button click"""
+        btn = self.sender()
+        if not btn: return
+        pos = btn.parent().mapToGlobal(btn.pos())
+        pos_in_table = self.table.viewport().mapFromGlobal(pos)
+        row = self.table.rowAt(pos_in_table.y())
+        if row >= 0:
+            title = self.current_data[row].get('title', '')
+            if title:
+                # 1688 Image Search (Literal Search)
+                # Ideally use image search API, but here we fallback to text search which works for MVP
+                # Cleaning title for better search results
+                clean_title = title.replace("TikTok", "").strip()[:50] 
+                url = f"https://s.1688.com/selloffer/offer_search.htm?keywords={urllib.parse.quote(clean_title)}"
+                webbrowser.open(url)
+                Toast.show_info(self, "已打开浏览器搜索同款")
+
+    def start_ai_worker(self, title, price, sales):
+        """启动异步 AI 分析线程"""
+        if title in self.ai_workers:
+            Toast.show_warning(self, "该商品正在分析中，请稍候...")
+            return
+
+        worker = AIAnalysisWorker(title, price, sales)
+        worker.finished.connect(lambda t, res: self.on_ai_finished(t, res))
+        worker.error.connect(lambda t, err: self.on_ai_error(t, err))
+        
+        self.ai_workers[title] = worker
+        worker.start()
+        Toast.show_info(self, f"🤖 AI 正在分析: {title[:15]}...")
+
+    def on_ai_finished(self, title, result):
+        if title in self.ai_workers:
+            del self.ai_workers[title]
+        
+        # Show Result
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(f"AI 参谋报告")
+        msg_box.setText(result)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setStyleSheet("QLabel{min-width: 500px; min-height: 300px;}")
+        msg_box.exec_()
+
+    def on_ai_error(self, title, error):
+        if title in self.ai_workers:
+            del self.ai_workers[title]
+        Toast.show_error(self, f"分析失败: {error}")
 
     def on_delete_clicked(self):
         """Handle delete button click"""
@@ -461,14 +530,6 @@ class ProfitAnalysisWidget(QWidget):
 
     def analyze_product_ai(self, title):
         """调用 AI 参谋 (DeepSeek)"""
-        from api.deepseek_client import get_deepseek_client
-        from ui.toast import Toast
-        
-        client = get_deepseek_client()
-        if not client.is_configured():
-            QMessageBox.warning(self, "未配置", "AI 参谋需要配置 DeepSeek API Key。\n请前往【系统设置】进行配置。")
-            return
-
         # Find row data
         row_data = None
         for item in self.current_data:
@@ -479,29 +540,7 @@ class ProfitAnalysisWidget(QWidget):
         if not row_data:
             return
 
-        Toast.show_info(self, f"正在分析商品: {title[:15]}...")
-        QApplication.processEvents()
-
-        # Call AI (Synchronous for now, ideally strictly async worker)
-        # For simple text analysis, sync call might freeze UI for 2-5s, OK for MVP.
-        # Improvement: Move to thread.
-        try:
-            analysis = client.analyze_product_potential(
-                title, 
-                row_data.get('tk_price', 0), 
-                row_data.get('sales', 0)
-            )
-            
-            # Show Result Dialog
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle(f"AI 参谋报告 - {title[:10]}...")
-            msg_box.setText(analysis)
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.setStyleSheet("QLabel{min-width: 400px;}")
-            msg_box.exec_()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "分析失败", str(e))
+        self.start_ai_worker(title, row_data.get('tk_price', 0), row_data.get('sales', 0))
 
     def load_history_from_db(self):
         """从数据库加载历史选品数据 (ORM)"""

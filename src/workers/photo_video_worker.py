@@ -1,4 +1,4 @@
-"""图文成片 Worker（Photo-to-Video Engine）
+"""图转视频 Worker（Photo-to-Video Engine）
 
 流程：
 - 生成时间轴脚本（含情感标签）
@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from datetime import datetime
 import math
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 import config
 from workers.base_worker import BaseWorker
 from tts import synthesize as tts_synthesize
+from utils.cloud_video import generate_video_from_image
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 class PhotoVideoWorker(BaseWorker):
-    """图文成片 Worker。"""
+    """图转视频 Worker。"""
 
     def __init__(
         self,
@@ -52,6 +54,7 @@ class PhotoVideoWorker(BaseWorker):
         image_durations: list[float] | None = None,
         role_prompt: str = "",
         model: str = "",
+        provider: str = "",
         bgm_path: str = "",
         total_duration: float = 15.0,
     ) -> None:
@@ -62,6 +65,7 @@ class PhotoVideoWorker(BaseWorker):
         self.image_durations = [float(x) for x in (image_durations or [])]
         self.role_prompt = (role_prompt or "").strip()
         self.model = (model or "").strip()
+        self.provider = (provider or "").strip()
         self.bgm_path = (bgm_path or "").strip()
         self.total_duration = max(5.0, float(total_duration or 15.0))
 
@@ -132,9 +136,14 @@ class PhotoVideoWorker(BaseWorker):
             self.emit_log("⚠️ 字幕生成失败，将继续输出无字幕视频")
 
         self.emit_log("🖼️ 正在生成图片流视频...")
-        video_path = self._compose_photo_video(timeline, audio_path, out_dir / self._name_video)
+        video_path = ""
+        if bool(getattr(config, "VIDEO_CLOUD_ENABLED", False)):
+            self.emit_log("☁️ 使用云端图转视频（真实生成）...")
+            video_path = self._compose_cloud_video(timeline, out_dir / self._name_video)
         if not video_path:
-            self.emit_finished(False, "图文成片失败")
+            video_path = self._compose_photo_video(timeline, audio_path, out_dir / self._name_video)
+        if not video_path:
+            self.emit_finished(False, "图转视频失败")
             return
 
         # 可选：烧录字幕
@@ -148,10 +157,64 @@ class PhotoVideoWorker(BaseWorker):
             video_path = compressed
 
         self.data_signal.emit({"video": str(video_path), "srt": str(srt_path) if srt_path else ""})
-        self.emit_finished(True, "图文成片完成")
+        self.emit_finished(True, "图转视频完成")
+
+    def _compose_cloud_video(self, timeline: list[dict], out_path: Path) -> str:
+        """使用云端图转视频生成主画面，并替换音频。"""
+        try:
+            if not self.images:
+                self.emit_log("未提供图片，无法云端生成")
+                return ""
+
+            prompt = (self.product_desc or "").strip()
+            if self.role_prompt:
+                prompt = f"{prompt}\n风格要求：{self.role_prompt}"
+
+            quality = (getattr(config, "VIDEO_CLOUD_QUALITY", "low") or "low").strip()
+            fps = int(getattr(config, "PHOTO_VIDEO_FPS", 24) or 24)
+            duration = float(self.total_duration or 6.0)
+
+            # Determine which model to use for Video Generation
+            # If self.model is a video model (e.g. Seedance), use it.
+            # Otherwise use default from config.VIDEO_CLOUD_MODEL
+            video_model_override = ""
+            if self.model:
+                m_low = self.model.lower()
+                if any(k in m_low for k in ("seedance", "t2v", "i2v", "wan2.1", "wan2-1")):
+                    video_model_override = self.model
+                    self.emit_log(f"🎬 使用指定视频模型：{self.model}")
+
+            ok, msg = generate_video_from_image(
+                image_path=self.images[0],
+                prompt=prompt,
+                out_path=out_path,
+                duration=duration,
+                fps=fps,
+                quality=quality,
+                model=video_model_override,
+            )
+            if not ok:
+                self.emit_log(f"云端生成失败：{msg}")
+                return ""
+
+            # 替换为时间轴配音（若存在）
+            merged_path = out_path.with_name(out_path.stem + "_tts.mp4")
+            from video.processor import VideoProcessor
+            processor = VideoProcessor()
+            audio_path = str((Path(self.output_dir) / self._name_audio).resolve())
+            if Path(audio_path).exists():
+                ok_merge, res = processor.merge_av(str(out_path), audio_path, str(merged_path))
+                if ok_merge:
+                    return str(merged_path)
+            return str(out_path)
+        except Exception as e:
+            self.emit_log(f"云端图转视频异常：{e}")
+            return ""
 
     def _prepare_output_dir(self) -> Path:
-        base = Path(self.output_dir or getattr(config, "OUTPUT_DIR", Path("Output"))) / "Photo_Videos"
+        base = Path(self.output_dir or getattr(config, "OUTPUT_DIR", Path("Output")))
+        if base.name.lower() != "image_videos":
+            base = base / "Image_Videos"
         base.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = base / ts
@@ -162,13 +225,16 @@ class PhotoVideoWorker(BaseWorker):
         try:
             import openai
 
-            api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+            from utils.ai_routing import resolve_ai_profile
+
+            profile = resolve_ai_profile("photo", model_override=self.model, provider_override=self.provider)
+            api_key = (profile.get("api_key", "") or "").strip()
             if not api_key:
                 self.emit_log("AI_API_KEY 未配置")
                 return []
 
-            base_url = ((getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com")
-            use_model = self.model or (getattr(config, "AI_MODEL", "") or "deepseek-chat")
+            base_url = (profile.get("base_url", "") or "").strip() or "https://api.deepseek.com"
+            use_model = (profile.get("model", "") or "").strip() or "deepseek-chat"
 
             system = (
                 "You are a TikTok short-form script writer. "
@@ -182,7 +248,9 @@ class PhotoVideoWorker(BaseWorker):
                 f"Total duration: {self.total_duration:.1f} seconds.\n"
                 "Constraints:\n"
                 "- English pacing ~2.5 words/second.\n"
-                "- Emotion must be one of: happy, sad, angry, surprise, neutral.\n"
+                "- Emotion must be one of: happy, sad, angry, surprise, neutral, excited, calm, serious, curious, persuasive, suspense, warm, firm, energetic.\n"
+                "- Emotion selection guide: hook=excited/curious, pain=serious, solution=persuasive/warm, CTA=firm/energetic.\n"
+                "- Structure guide: ensure segments roughly follow Hook -> Pain -> Solution -> CTA in order.\n"
                 "- Output STRICT JSON object with key timeline only.\n\n"
                 "JSON schema:\n"
                 "{\n"
@@ -192,18 +260,86 @@ class PhotoVideoWorker(BaseWorker):
                 "}\n\n"
                 f"Product description:\n{self.product_desc}\n"
             )
+            try:
+                scene_mode = (getattr(config, "TTS_SCENE_MODE", "") or "").strip()
+            except Exception:
+                scene_mode = ""
+            if scene_mode:
+                user += f"\nScene mode: {scene_mode} (tone guidance)\n"
 
             client = openai.OpenAI(api_key=api_key, base_url=base_url)
-            resp = client.chat.completions.create(
-                model=use_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.4,
-                max_tokens=1200,
-                response_format={"type": "json_object"},
-            )
+
+            # --- Model Capability Validation & Text Fallback ---
+            # If the user configured a Video Model (e.g. Seedance) for this task,
+            # we must fallback to a Text Model for the SCRIPT generation step,
+            # while preserving the user's Video Model choice for the later video generation step.
+            _model_lower = use_model.lower()
+            if any(k in _model_lower for k in ("seedance", "t2v", "i2v", "wan2.1", "wan2-1")):
+                self.emit_log(f"⚠️ 检测到视频模型 '{use_model}' 用于脚本生成")
+                
+                # Fallback to Global Text Model
+                fallback_model = (getattr(config, "AI_MODEL", "") or "").strip() or "deepseek-chat"
+                fallback_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+                fallback_base = (getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com"
+                
+                self.emit_log(f"🔄 自动切换至文本模型 '{fallback_model}' 进行脚本编写...")
+                
+                if not fallback_key:
+                    self.emit_log("❌ 无法切换：全局 AI_API_KEY 未配置")
+                    return []
+                    
+                client = openai.OpenAI(api_key=fallback_key, base_url=fallback_base)
+                use_model = fallback_model
+
+            # 2. DeepSeek Model Name Validation & Auto-Correction
+            if "deepseek.com" in base_url:
+                if use_model not in ("deepseek-chat", "deepseek-reasoner"):
+                    original_model = use_model
+                    # Auto-correct R1 variants to deepseek-reasoner
+                    if "r1" in original_model.lower():
+                        use_model = "deepseek-reasoner"
+                        self.emit_log(f"⚠️ 自动修正：模型 '{original_model}' -> '{use_model}' (DeepSeek R1 官方名称)")
+                    else:
+                        # Auto-correct V3 variants to deepseek-chat
+                        use_model = "deepseek-chat"
+                        self.emit_log(f"⚠️ 自动修正：模型 '{original_model}' -> '{use_model}' (DeepSeek V3 官方名称)")
+                    
+                    self.emit_log("💡 提示：DeepSeek 官方 API 仅支持 'deepseek-chat' (V3) 和 'deepseek-reasoner' (R1)。")
+
+            def _is_transient_error(err: Exception) -> bool:
+                msg = str(err) or ""
+                msg_low = msg.lower()
+                if "internalserviceerror" in msg_low:
+                    return True
+                if "internal server error" in msg_low:
+                    return True
+                if "error code: 500" in msg_low or "http 500" in msg_low:
+                    return True
+                return False
+
+            resp = None
+            for attempt in range(1, 4):
+                try:
+                    resp = client.chat.completions.create(
+                        model=use_model,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        temperature=0.4,
+                        max_tokens=4096,
+                        response_format={"type": "json_object"},
+                    )
+                    break
+                except Exception as e:
+                    if _is_transient_error(e) and attempt < 3:
+                        self.emit_log(f"⚠️ 时间轴生成失败（服务端错误），准备重试 {attempt}/3...")
+                        time.sleep(1.2 * attempt)
+                        continue
+                    raise
+
+            if resp is None:
+                return []
 
             try:
                 if resp and resp.usage:
@@ -222,6 +358,17 @@ class PhotoVideoWorker(BaseWorker):
 
             return self._normalize_timeline(timeline)
         except Exception as e:
+            # 强化错误提示
+            err_msg = str(e)
+            if "Error code: 404" in err_msg or "NotFound" in err_msg:
+                friendly_msg = f"❌ 模型不存在或不可用 ({use_model})。请检查设置中的模型名称。"
+                self.emit_log(friendly_msg)
+                return []
+            if "Error code: 400" in err_msg:
+                 friendly_msg = f"❌ 请求参数错误 (400)。可能是当前模型 ({use_model}) 不支持所请求的功能（如 JSON 模式）。"
+                 self.emit_log(friendly_msg)
+                 return []
+            
             logger.error(f"时间轴生成失败: {e}", exc_info=True)
             self.emit_log(f"时间轴生成失败：{e}")
             return []
@@ -449,7 +596,7 @@ class PhotoVideoWorker(BaseWorker):
             video.write_videofile(str(out_path), codec="libx264", audio_codec="aac", fps=fps, logger=None)
             return str(out_path)
         except Exception as e:
-            self.emit_log(f"图文成片失败：{e}")
+            self.emit_log(f"图转视频失败：{e}")
             return ""
 
     def _burn_subtitles_ffmpeg(self, *, input_video_path: str, srt_path: str) -> str:

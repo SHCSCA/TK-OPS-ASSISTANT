@@ -15,10 +15,19 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QDoubleSpinBox,
     QFrame,
+    QComboBox,
 )
 
+import config
 from workers.visual_analysis_worker import VisualAnalysisWorker
 from utils.ui_log import append_log, install_log_context_menu
+from utils.ai_models_cache import get_provider_models, list_ok_providers
+
+_PROVIDER_LABELS = {
+    "doubao": "豆包/火山",
+    "qwen": "千问/通义",
+    "deepseek": "DeepSeek",
+}
 
 
 class VisualLabPanel(QWidget):
@@ -66,6 +75,24 @@ class VisualLabPanel(QWidget):
         row_interval.addStretch(1)
         form.addLayout(row_interval)
 
+        row_ai = QHBoxLayout()
+        row_ai.addWidget(QLabel("AI 供应商："))
+        self.vision_provider_combo = QComboBox()
+        cur_provider = (getattr(config, "AI_VISION_PROVIDER", "") or "").strip()
+        self._setup_provider_combo(self.vision_provider_combo, cur_provider)
+        row_ai.addWidget(self.vision_provider_combo)
+
+        row_ai.addWidget(QLabel("视觉模型："))
+        self.vision_model_combo = QComboBox()
+        row_ai.addWidget(self.vision_model_combo)
+        try:
+            self.vision_provider_combo.currentIndexChanged.connect(self._refresh_vision_models)
+        except Exception:
+            pass
+        self._refresh_vision_models()
+        row_ai.addStretch(1)
+        form.addLayout(row_ai)
+
         row_btn = QHBoxLayout()
         self.start_btn = QPushButton("开始拆解")
         self.start_btn.setProperty("variant", "primary")
@@ -105,6 +132,62 @@ class VisualLabPanel(QWidget):
         layout.addStretch(1)
         self.setLayout(layout)
 
+    def refresh(self):
+        try:
+            self._setup_provider_combo(self.vision_provider_combo, getattr(config, "AI_VISION_PROVIDER", ""))
+            self._refresh_vision_models()
+        except Exception:
+            pass
+
+    def _setup_provider_combo(self, combo: QComboBox, current_provider: str = "") -> None:
+        ok_providers = set(list_ok_providers())
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("默认（系统设置）", "")
+            for key in ("doubao", "qwen", "deepseek"):
+                if key in ok_providers:
+                    combo.addItem(_PROVIDER_LABELS.get(key, key), key)
+            idx = combo.findData((current_provider or "").strip())
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _fill_model_combo(self, combo: QComboBox, models: list[str], fallback_model: str = "") -> None:
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            clean_models = [m for m in (models or []) if m]
+            if clean_models:
+                combo.addItems(clean_models)
+            else:
+                if fallback_model:
+                    combo.addItem(fallback_model)
+                else:
+                    combo.addItem("（未获取模型）")
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _refresh_vision_models(self) -> None:
+        provider = ""
+        try:
+            provider = self.vision_provider_combo.currentData() or ""
+        except Exception:
+            provider = ""
+        models = get_provider_models(provider) if provider else []
+        fallback = (
+            (getattr(config, "AI_VISION_MODEL", "") or "").strip()
+            or (getattr(config, "AI_MODEL", "") or "").strip()
+        )
+        self._fill_model_combo(self.vision_model_combo, models, fallback)
+
     def _pick_video(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -134,6 +217,8 @@ class VisualLabPanel(QWidget):
         self.worker = VisualAnalysisWorker(
             video_path=video_path,
             interval_sec=float(self.interval_spin.value()),
+            model=(self.vision_model_combo.currentText() or "").strip(),
+            provider=(self.vision_provider_combo.currentData() or ""),
         )
         self.worker.log_signal.connect(lambda m: append_log(self.log_view, m))
         self.worker.data_signal.connect(self._on_result)

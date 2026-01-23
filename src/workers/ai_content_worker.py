@@ -35,6 +35,7 @@ class AIContentWorker(QThread):
         skip_tts_failure: bool = True,
         role_prompt: str = "",
         model: str = "",
+        provider: str = "",
         script_text: str = "",
         script_json: dict | None = None,
     ):
@@ -45,6 +46,7 @@ class AIContentWorker(QThread):
         self.skip_tts_failure = skip_tts_failure
         self.role_prompt = role_prompt
         self.model = model
+        self.provider = (provider or "").strip()
         self.script_text = (script_text or "").strip()
         self.script_json = script_json or {}
         self._last_script_error: str = ""
@@ -170,7 +172,10 @@ class AIContentWorker(QThread):
 
             self._last_script_error = ""
 
-            api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+            from utils.ai_routing import resolve_ai_profile
+
+            profile = resolve_ai_profile("factory", model_override=self.model, provider_override=self.provider)
+            api_key = (profile.get("api_key", "") or "").strip()
             if not api_key:
                 logger.warning("AI_API_KEY 未配置")
                 return None
@@ -178,13 +183,13 @@ class AIContentWorker(QThread):
             # 配置 OpenAI 兼容客户端
             client = openai.OpenAI(
                 api_key=api_key,
-                base_url=((getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com"),
+                base_url=(profile.get("base_url", "") or "").strip() or "https://api.deepseek.com",
             )
 
             # 火山方舟（Ark）深度思考：仅当用户显式配置且 base_url 为 Ark 时透传。
             base_url_now = ""
             try:
-                base_url_now = (getattr(config, "AI_BASE_URL", "") or "").strip()
+                base_url_now = (profile.get("base_url", "") or "").strip()
             except Exception:
                 base_url_now = ""
 
@@ -236,10 +241,22 @@ Requirements:
 Output ONLY the script text, no formatting.
 """.strip()
 
-            use_model = (
-                (self.model or "").strip()
-                or (getattr(config, "AI_MODEL", "") or "deepseek-chat")
-            )
+            use_model = (profile.get("model", "") or "").strip() or "deepseek-chat"
+
+            # --- Model Capability Validation ---
+            _model_lower = use_model.lower()
+            if any(k in _model_lower for k in ("seedance", "t2v", "i2v", "wan2.1", "wan2-1")):
+                self.emit_log(f"⚠️ 错误：检测到视频生成模型 '{use_model}'")
+                self.emit_log("❌ 二创工厂的脚本生成环节需要文本模型，不能使用视频模型！")
+                return None
+
+            # Auto-correction for DeepSeek official API
+            if "deepseek.com" in (base_url_now or ""):
+                if use_model not in ("deepseek-chat", "deepseek-reasoner"):
+                    if "r1" in use_model.lower():
+                        use_model = "deepseek-reasoner"
+                    else:
+                        use_model = "deepseek-chat"
 
             # Ark（火山方舟）官方示例优先使用 Responses API
             if base_url_now and "volces.com" in base_url_now and hasattr(client, "responses"):
@@ -267,13 +284,20 @@ Output ONLY the script text, no formatting.
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
                     ],
-                    "max_tokens": 1000,
+                    "max_tokens": 4096, # Increased for reasoning models
                     "temperature": 0.5,
                 }
                 if ark_extra:
                     kwargs["extra_body"] = ark_extra
                     
                 response = client.chat.completions.create(**kwargs)
+
+                # 检查截断
+                try:
+                    if response.choices[0].finish_reason == "length":
+                         self.emit_log("⚠️ 警告：输出因达到最大长度限制而被截断 (Max Tokens)")
+                except Exception:
+                    pass
                 
                 # Token 统计
                 try:
@@ -311,11 +335,10 @@ Output ONLY the script text, no formatting.
         audio_path = Path(self.output_dir) / self._name_voice
         provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
         fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
-        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
-        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
+        emotion_instruction = self._build_emotion_instruction("neutral")
 
         def _try(p: str) -> None:
-            tts_synthesize(text=text, out_path=audio_path, provider=p)
+            tts_synthesize(text=text, out_path=audio_path, provider=p, emotion=emotion_instruction)
 
         try:
             _try(provider)
@@ -338,6 +361,58 @@ Output ONLY the script text, no formatting.
         except Exception as e:
             logger.error(f"TTS 合成失败: {e}")
             return None, str(e)
+
+    def _build_emotion_instruction(self, base_emotion: str) -> str:
+        """构建豆包 TTS 2.0 情绪指令文本。"""
+        preset = (getattr(config, "TTS_EMOTION_PRESET", "") or "").strip()
+        custom = (getattr(config, "TTS_EMOTION_CUSTOM", "") or "").strip()
+        intensity = (getattr(config, "TTS_EMOTION_INTENSITY", "中") or "中").strip()
+        scene_mode = (getattr(config, "TTS_SCENE_MODE", "") or "").strip().lower()
+
+        scene_templates = {
+            "commerce": "用强转化、强节奏、强调卖点的带货语气说",
+            "review": "用客观、冷静、对比分析的测评语气说",
+            "unboxing": "用真实、兴奋、细节描述的开箱语气说",
+            "story": "用剧情对白的语气说，带有情绪起伏",
+            "talk": "用清晰、稳定、讲解导向的口播语气说",
+        }
+
+        emotion = (base_emotion or "").strip().lower()
+        emotion_map = {
+            "happy": "开心",
+            "sad": "悲伤",
+            "angry": "生气",
+            "surprise": "惊讶",
+            "neutral": "平静",
+            "excited": "兴奋",
+            "calm": "沉稳",
+            "serious": "严肃",
+            "curious": "好奇",
+            "persuasive": "劝导",
+            "suspense": "悬念",
+            "warm": "温柔",
+            "firm": "坚定",
+            "energetic": "有活力",
+        }
+
+        parts = []
+        scene_hint = scene_templates.get(scene_mode, "")
+        if scene_hint:
+            parts.append(scene_hint)
+        if preset:
+            parts.append(preset)
+        if custom:
+            parts.append(custom)
+
+        if emotion and emotion != "neutral":
+            emotion_cn = emotion_map.get(emotion, emotion)
+            parts.append(f"情绪偏{emotion_cn}，强度{intensity}")
+        elif parts:
+            parts.append(f"情绪强度{intensity}")
+        else:
+            return ""
+
+        return "，".join([p for p in parts if p])
 
     def synthesize_timeline_voice(self, timeline: list[dict]) -> tuple[str, str]:
         """根据时间轴逐段合成语音，并做弹性对齐 (FFmpeg版)。"""
@@ -373,6 +448,7 @@ Output ONLY the script text, no formatting.
                 
                 text = (seg.get("text", "") or "").strip()
                 emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
+                emotion_instruction = self._build_emotion_instruction(emotion)
                 if not text or end <= start: continue
 
                 # 1. Handle Gap (Silence)
@@ -386,7 +462,7 @@ Output ONLY the script text, no formatting.
 
                 # 2. Generate TTS
                 seg_out = Path(self.output_dir) / f"tts_seg_{i:03d}.mp3"
-                if not _gen_tts(text, emotion, seg_out):
+                if not _gen_tts(text, emotion_instruction, seg_out):
                     return "", f"TTS generation failed for segment {i}"
                 
                 if not seg_out.exists():
@@ -455,12 +531,148 @@ Output ONLY the script text, no formatting.
             except Exception:
                 continue
             text = (seg.get("text", "") or "").strip()
-            emotion = (seg.get("emotion", "neutral") or "neutral").strip()
+            emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
             if not text or end <= start:
                 continue
+            emotion = self._normalize_or_infer_emotion(emotion, text)
             cleaned.append({"start": start, "end": end, "text": text, "emotion": emotion})
         cleaned.sort(key=lambda x: x["start"])
+        cleaned = self._apply_structural_emotion(cleaned)
         return cleaned
+
+    def _scene_emotion_defaults(self) -> dict[str, str]:
+        """根据场景模式返回情绪推荐。"""
+        scene_mode = (getattr(config, "TTS_SCENE_MODE", "") or "").strip().lower()
+        # 默认：通用转化节奏
+        mapping = {
+            "hook": "excited",
+            "pain": "serious",
+            "solution": "persuasive",
+            "cta": "firm",
+        }
+
+        if scene_mode == "commerce":
+            return {"hook": "excited", "pain": "serious", "solution": "persuasive", "cta": "energetic"}
+        if scene_mode == "review":
+            return {"hook": "curious", "pain": "serious", "solution": "calm", "cta": "firm"}
+        if scene_mode == "unboxing":
+            return {"hook": "excited", "pain": "neutral", "solution": "warm", "cta": "energetic"}
+        if scene_mode == "story":
+            return {"hook": "suspense", "pain": "sad", "solution": "warm", "cta": "firm"}
+        if scene_mode == "talk":
+            return {"hook": "curious", "pain": "serious", "solution": "persuasive", "cta": "firm"}
+        return mapping
+
+    def _apply_structural_emotion(self, timeline: list[dict]) -> list[dict]:
+        """按结构（Hook/Pain/Solution/CTA）为中性段落补情绪。"""
+        if not timeline:
+            return timeline
+        total_end = max([seg.get("end", 0) for seg in timeline if isinstance(seg, dict)] or [0])
+        if total_end <= 0:
+            return timeline
+
+        defaults = self._scene_emotion_defaults()
+
+        for seg in timeline:
+            if not isinstance(seg, dict):
+                continue
+            emo = (seg.get("emotion", "neutral") or "neutral").strip().lower()
+            if emo and emo != "neutral":
+                continue
+
+            start = float(seg.get("start", 0) or 0)
+            end = float(seg.get("end", 0) or 0)
+            mid = (start + end) / 2.0
+            ratio = 0 if total_end == 0 else (mid / total_end)
+
+            # 结构阶段：前20% Hook，中间前半痛点，后半解决，最后15% CTA
+            if ratio <= 0.2:
+                seg["emotion"] = defaults.get("hook", "excited")
+                continue
+            if ratio <= 0.5:
+                seg["emotion"] = defaults.get("pain", "serious")
+                continue
+            if ratio <= 0.85:
+                seg["emotion"] = defaults.get("solution", "persuasive")
+                continue
+            seg["emotion"] = defaults.get("cta", "firm")
+
+        return timeline
+
+    def _normalize_or_infer_emotion(self, emotion: str, text: str) -> str:
+        """标准化情绪标签；空/未知时基于文本做轻量推断。"""
+        allowed = {
+            "happy",
+            "sad",
+            "angry",
+            "surprise",
+            "neutral",
+            "excited",
+            "calm",
+            "serious",
+            "curious",
+            "persuasive",
+            "suspense",
+            "warm",
+            "firm",
+            "energetic",
+        }
+        emo = (emotion or "").strip().lower()
+        if emo in allowed:
+            return emo
+        inferred = self._infer_emotion_from_text(text)
+        return inferred or "neutral"
+
+    def _infer_emotion_from_text(self, text: str) -> str:
+        """根据文本内容推断情绪（仅用于兜底）。"""
+        t = (text or "").lower()
+
+        # 疑问/引导
+        if "?" in t or "？" in t or "why" in t or "what" in t or "how" in t or "怎么" in t or "为何" in t:
+            return "curious"
+
+        # 强召唤 / 行动号召
+        cta_keywords = [
+            "buy now",
+            "get it",
+            "order",
+            "shop",
+            "limited",
+            "hurry",
+            "right now",
+            "马上",
+            "现在",
+            "立刻",
+            "赶紧",
+            "抢",
+            "下单",
+            "购买",
+            "到手",
+        ]
+        if any(k in t for k in cta_keywords):
+            return "firm"
+
+        # 兴奋/吸睛
+        excited_keywords = ["wow", "amazing", "insane", "crazy", "必看", "炸裂", "超", "太", "绝了"]
+        if any(k in t for k in excited_keywords) or "!" in t or "！" in t:
+            return "excited"
+
+        # 负向/问题场景
+        negative_keywords = ["pain", "problem", "annoy", "hate", "难受", "麻烦", "困扰", "糟糕", "烦", "痛点"]
+        if any(k in t for k in negative_keywords):
+            return "serious"
+
+        # 解决/说服
+        persuasive_keywords = ["solution", "fix", "solve", "帮你", "解决", "改善", "建议", "推荐", "reason"]
+        if any(k in t for k in persuasive_keywords):
+            return "persuasive"
+
+        # 温和种草
+        warm_keywords = ["gentle", "soft", "cozy", "舒服", "温柔", "安心", "放松", "治愈"]
+        if any(k in t for k in warm_keywords):
+            return "warm"
+
+        return "neutral"
     def _copy_original_video(self, script_path: str = "") -> str:
         try:
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)

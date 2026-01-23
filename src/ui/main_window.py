@@ -11,15 +11,16 @@
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QStatusBar,
-    QStackedWidget, QFrame, QMessageBox
+    QStackedWidget, QFrame, QMessageBox, QProgressDialog
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QTimer
+import sys
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
 from utils.lan_server import get_lan_server
-from utils.updater import UpdateChecker, AutoUpdater
+from utils.updater import UpdateChecker, AutoUpdater, UpdateDownloader
 import importlib
 
 class LazyLoader(QWidget):
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         """Startup update check"""
         self._update_checker = UpdateChecker()
         self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.check_finished.connect(self._on_update_check_finished)
         self._update_checker.start()
 
     def _on_update_available(self, version, url, notes):
@@ -110,13 +112,64 @@ class MainWindow(QMainWindow):
         msg.setWindowTitle("发现新版本")
         msg.setText(f"检测到新版本 v{version}！\n\n更新内容：\n{notes}")
         msg.setIcon(QMessageBox.Information)
-        btn_download = msg.addButton("去下载", QMessageBox.ActionRole)
+        btn_update = msg.addButton("立即更新", QMessageBox.ActionRole)
         msg.addButton("稍后", QMessageBox.RejectRole)
         msg.exec_()
         
-        if msg.clickedButton() == btn_download:
-            import webbrowser
-            webbrowser.open(url)
+        if msg.clickedButton() == btn_update:
+            if not getattr(sys, "frozen", False):
+                ok = AutoUpdater.install_and_restart("")
+                if not ok:
+                    QMessageBox.warning(self, "失败", "源码更新失败，请检查 git 是否可用。")
+                return
+            if not url:
+                QMessageBox.warning(self, "错误", "未找到下载链接")
+                return
+            self._start_update_download(url)
+
+    def _on_update_check_finished(self, success: bool, message: str):
+        try:
+            if hasattr(self, "statusBar") and self.statusBar():
+                self.statusBar().showMessage(f"更新检查：{message}", 5000)
+        except Exception:
+            pass
+
+    def _start_update_download(self, url):
+        """Start downloading the update"""
+        self.progress_dlg = QProgressDialog("正在下载更新...", "取消", 0, 100, self)
+        self.progress_dlg.setWindowModality(Qt.WindowModal)
+        self.progress_dlg.setMinimumDuration(0)
+        self.progress_dlg.setValue(0)
+
+        self.downloader = UpdateDownloader(url)
+        self.downloader.progress.connect(self._on_download_progress)
+        self.downloader.finished.connect(self._on_download_finished)
+        self.downloader.start()
+
+        # Connect cancel button
+        self.progress_dlg.canceled.connect(self.downloader.terminate)
+
+    def _on_download_progress(self, pct):
+        if hasattr(self, 'progress_dlg'):
+            self.progress_dlg.setValue(pct)
+
+    def _on_download_finished(self, success, path):
+        if hasattr(self, 'progress_dlg'):
+            self.progress_dlg.close()
+            
+        if success:
+            reply = QMessageBox.question(
+                self, "下载完成", 
+                "更新包已就绪，是否立即重启应用进行安装覆盖？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                if path:
+                    AutoUpdater.install_and_restart(path)
+                else:
+                    QMessageBox.warning(self, "失败", "更新包路径为空")
+        else:
+            QMessageBox.warning(self, "下载失败", f"更新下载失败：{path}")
     
     def _run_migrations(self):
         """V2.0 启动时执行数据库迁移"""
@@ -168,14 +221,15 @@ class MainWindow(QMainWindow):
         self.crm_panel = self._create_lazy("ui.crm", "CRMWidget")
         self.engagement_panel = self._create_lazy("ui.engagement", "EngagementPanel")
         self.downloader_panel = self._create_lazy("ui.downloader", "DownloaderPanel")
-        self.ai_content_factory_panel = self._create_lazy("ui.ai_content_factory", "AIContentFactoryPanel", enable_photo=False)
+        self.ai_content_factory_panel = self._create_lazy("ui.ai_content_factory", "AIContentFactoryPanel", enable_photo=False, enable_cyborg=False)
+        self.cyborg_panel = self._create_lazy("ui.ai_content_factory", "CyborgPanel")
         self.photo_video_panel = self._create_lazy("ui.ai_content_factory", "PhotoVideoPanel")
         self.visual_lab_panel = self._create_lazy("ui.visual_lab", "VisualLabPanel")
         self.lan_airdrop_panel = self._create_lazy("ui.lan_airdrop", "LanAirdropPanel")
         self.diagnostics_panel = self._create_lazy("ui.diagnostics", "DiagnosticsPanel")
         self.settings_panel = self._create_lazy("ui.settings", "SettingsPanel")
 
-        # 顺序必须严格对应 Navigation Index [0..11]
+        # 顺序必须严格对应 Navigation Index [0..12]
         self.panels_ordered = [
             self.dashboard_panel,           # 0
             self.profit_panel,              # 1
@@ -184,11 +238,12 @@ class MainWindow(QMainWindow):
             self.engagement_panel,          # 4
             self.downloader_panel,          # 5
             self.ai_content_factory_panel,  # 6
-            self.photo_video_panel,         # 7
-            self.visual_lab_panel,          # 8
-            self.lan_airdrop_panel,         # 9
-            self.diagnostics_panel,         # 10
-            self.settings_panel             # 11
+            self.cyborg_panel,              # 7
+            self.photo_video_panel,         # 8
+            self.visual_lab_panel,          # 9
+            self.lan_airdrop_panel,         # 10
+            self.diagnostics_panel,         # 11
+            self.settings_panel             # 12
         ]
 
         for panel in self.panels_ordered:
@@ -243,19 +298,20 @@ class MainWindow(QMainWindow):
             ("🎨 内容创作", [
                 ("🎬  素材工厂", 2),
                 ("🧠  AI 二创工厂", 6),
-                ("🖼️  图文成片", 7),
-                ("👁️  视觉实验室", 8),
+                ("🐴  半人马拼接", 7),
+                ("🖼️  图转视频", 8),
+                ("👁️  视觉实验室", 9),
             ]),
             ("💼 电商运营", [
                 ("💰  选品清洗池", 1),
             ]),
             ("🛠️ 实用工具", [
                 ("⬇️  素材下载器", 5),
-                ("📡  局域网空投", 9),
+                ("📡  局域网空投", 10),
             ]),
             ("🔧 系统管理", [
-                ("🧪  诊断中心", 10),
-                ("⚙️  系统设置", 11),
+                ("🧪  诊断中心", 11),
+                ("⚙️  系统设置", 12),
             ])
         ]
 

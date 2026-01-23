@@ -103,12 +103,11 @@ class DashboardPanel(QWidget):
         # Buttons definition: (Title, Icon emoji, Target Index)
         # Indexes based on main_window.py _on_nav_changed 
         # (Check main_window.py for mapping)
-        # 1=Clean, 2=Material, 3=CRM, 4=Download, 5=AI, 6=Photo, 7=Visual, 8=Lan, 9=Diag, 10=Set
         actions = [
             ("素材工厂", "🎬", 2, "primary"),
-            ("素材下载", "⬇️", 4, "default"),
+            ("素材下载", "⬇️", 5, "default"),
             ("选品清洗", "💰", 1, "default"),
-            ("AI 二创", "🧠", 5, "default"),
+            ("AI 二创", "🧠", 6, "default"),
         ]
         
         for i, (text, icon, idx, variant) in enumerate(actions):

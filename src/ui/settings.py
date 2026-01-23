@@ -2,18 +2,28 @@
 Settings Panel
 """
 from tts.volc_docs import fetch_voice_types_from_docs
+import base64
+import requests
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QSpinBox, QDoubleSpinBox, QPushButton, QFrame, QCheckBox,
     QMessageBox, QComboBox, QApplication, QScrollArea, QSizePolicy, QTextEdit
 )
-from PyQt5.QtGui import QFont
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont, QImage, QColor
+from PyQt5.QtCore import Qt, QBuffer, QByteArray
 from api.echotik_api import EchoTikApiClient
 import config
 from pathlib import Path
 from utils.styles import apply_global_theme
+from utils.ai_models_cache import (
+    get_provider_models,
+    get_provider_status,
+    list_ok_providers,
+    set_provider_models,
+    set_provider_status,
+)
+import time
 
 
 def _norm_provider(text: str) -> str:
@@ -25,6 +35,10 @@ class SettingsPanel(QWidget):
     def __init__(self):
         super().__init__()
         self._init_ui()
+        try:
+            self._auto_refresh_providers_on_startup()
+        except Exception:
+            pass
     
     def _init_ui(self):
         """初始化设置界面"""
@@ -208,6 +222,111 @@ class SettingsPanel(QWidget):
         provider_layout.addWidget(self.ai_provider_input)
         layout.addLayout(provider_layout)
 
+        # 多供应商配置
+        providers_title = QLabel("多供应商配置（豆包 / 千问 / DeepSeek）")
+        providers_title.setObjectName("h3")
+        layout.addWidget(providers_title)
+
+        providers_hint = QLabel("填写后可在各功能选择供应商；测试/获取模型将使用所选供应商配置。")
+        providers_hint.setProperty("variant", "muted")
+        layout.addWidget(providers_hint)
+
+        # 供应商卡片（独立配置）
+        self._provider_status_labels = {}
+        self._provider_model_combos = {}
+
+        def _make_provider_card(provider_key: str, title_text: str, base_url_default: str) -> QFrame:
+            card = QFrame()
+            card.setProperty("class", "card")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 16, 16, 16)
+            card_layout.setSpacing(10)
+
+            title = QLabel(title_text)
+            title.setObjectName("h3")
+            card_layout.addWidget(title)
+
+            status_label = QLabel("状态：未检测")
+            status_label.setProperty("variant", "muted")
+            card_layout.addWidget(status_label)
+            self._provider_status_labels[provider_key] = status_label
+
+            base_row = QHBoxLayout()
+            base_row.setSpacing(8)
+            base_row.addWidget(QLabel("Base URL:"))
+            base_input = QLineEdit(base_url_default)
+            base_row.addWidget(base_input)
+            card_layout.addLayout(base_row)
+
+            key_row = QHBoxLayout()
+            key_row.setSpacing(8)
+            key_row.addWidget(QLabel("API Key:"))
+            key_input = QLineEdit("")
+            key_input.setEchoMode(QLineEdit.Password)
+            key_row.addWidget(key_input)
+            card_layout.addLayout(key_row)
+
+            model_row = QHBoxLayout()
+            model_row.setSpacing(8)
+            model_row.addWidget(QLabel("可用模型:"))
+            model_combo = QComboBox()
+            model_row.addWidget(model_combo)
+            card_layout.addLayout(model_row)
+            self._provider_model_combos[provider_key] = model_combo
+
+            btn_row = QHBoxLayout()
+            test_btn = QPushButton("测试连通")
+            fetch_btn = QPushButton("获取模型")
+            btn_row.addWidget(test_btn)
+            btn_row.addWidget(fetch_btn)
+            btn_row.addStretch(1)
+            card_layout.addLayout(btn_row)
+
+            # 绑定回调
+            test_btn.clicked.connect(lambda: self._test_provider(provider_key))
+            fetch_btn.clicked.connect(lambda: self._fetch_provider_models(provider_key))
+
+            # 保存输入框引用
+            setattr(self, f"_{provider_key}_base_input", base_input)
+            setattr(self, f"_{provider_key}_key_input", key_input)
+
+            return card
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(12)
+
+        doubao_default = getattr(config, "AI_DOUBAO_BASE_URL", "") or "https://ark.cn-beijing.volces.com/api/v3"
+        qwen_default = getattr(config, "AI_QWEN_BASE_URL", "") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ds_default = getattr(config, "AI_DEEPSEEK_BASE_URL", "") or "https://api.deepseek.com"
+
+        doubao_card = _make_provider_card("doubao", "豆包/火山", doubao_default)
+        qwen_card = _make_provider_card("qwen", "千问/通义", qwen_default)
+        ds_card = _make_provider_card("deepseek", "DeepSeek", ds_default)
+
+        cards_row.addWidget(doubao_card, 1)
+        cards_row.addWidget(qwen_card, 1)
+        cards_row.addWidget(ds_card, 1)
+        layout.addLayout(cards_row)
+
+        # 还原配置到输入框
+        self._set_text_safely(getattr(self, "_doubao_base_input", None), getattr(config, "AI_DOUBAO_BASE_URL", ""))
+        self._set_text_safely(getattr(self, "_qwen_base_input", None), getattr(config, "AI_QWEN_BASE_URL", ""))
+        self._set_text_safely(getattr(self, "_deepseek_base_input", None), getattr(config, "AI_DEEPSEEK_BASE_URL", ""))
+        self._set_text_safely(getattr(self, "_doubao_key_input", None), getattr(config, "AI_DOUBAO_API_KEY", ""))
+        self._set_text_safely(getattr(self, "_qwen_key_input", None), getattr(config, "AI_QWEN_API_KEY", ""))
+        self._set_text_safely(getattr(self, "_deepseek_key_input", None), getattr(config, "AI_DEEPSEEK_API_KEY", ""))
+
+        self.ai_doubao_base_url_input = getattr(self, "_doubao_base_input")
+        self.ai_qwen_base_url_input = getattr(self, "_qwen_base_input")
+        self.ai_deepseek_base_url_input = getattr(self, "_deepseek_base_input")
+        self.ai_doubao_api_key_input = getattr(self, "_doubao_key_input")
+        self.ai_qwen_api_key_input = getattr(self, "_qwen_key_input")
+        self.ai_deepseek_api_key_input = getattr(self, "_deepseek_key_input")
+
+        self._refresh_provider_card("doubao")
+        self._refresh_provider_card("qwen")
+        self._refresh_provider_card("deepseek")
+
         # Base URL
         base_url_layout = QHBoxLayout()
         base_url_layout.setSpacing(10)
@@ -254,18 +373,290 @@ class SettingsPanel(QWidget):
         api_key_layout.addWidget(self.ai_api_key_input)
         layout.addLayout(api_key_layout)
 
-        # Actions
-        action_row = QHBoxLayout()
-        self.ai_test_btn = QPushButton("测试 AI")
-        self.ai_test_btn.clicked.connect(self.test_ai_connection)
-        action_row.addWidget(self.ai_test_btn)
+        # 任务级覆盖（可选）
+        task_title = QLabel("任务级覆盖（可选）")
+        task_title.setObjectName("h3")
+        layout.addWidget(task_title)
 
-        self.ai_models_btn = QPushButton("获取模型")
-        self.ai_models_btn.clicked.connect(self.fetch_ai_models)
-        action_row.addWidget(self.ai_models_btn)
+        task_hint = QLabel("可为不同功能单独指定模型/接口/密钥，留空则使用全局配置。")
+        task_hint.setProperty("variant", "muted")
+        layout.addWidget(task_hint)
 
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
+        # 高级配置（任务级 Base URL / API Key）
+        advanced_toggle_row = QHBoxLayout()
+        self.ai_advanced_toggle_btn = QPushButton("显示高级配置")
+        self.ai_advanced_toggle_btn.setCheckable(True)
+        self.ai_advanced_toggle_btn.setChecked(False)
+        advanced_toggle_row.addWidget(self.ai_advanced_toggle_btn)
+        advanced_toggle_row.addStretch(1)
+        layout.addLayout(advanced_toggle_row)
+
+        self.ai_advanced_frame = QFrame()
+        self.ai_advanced_frame.setProperty("class", "config-frame")
+        self.ai_advanced_frame.setVisible(False)
+        advanced_layout = QVBoxLayout(self.ai_advanced_frame)
+        advanced_layout.setContentsMargins(12, 12, 12, 12)
+        advanced_layout.setSpacing(10)
+
+        def _toggle_advanced(checked: bool) -> None:
+            self.ai_advanced_frame.setVisible(bool(checked))
+            self.ai_advanced_toggle_btn.setText("隐藏高级配置" if checked else "显示高级配置")
+        self.ai_advanced_toggle_btn.toggled.connect(_toggle_advanced)
+
+        # 文案助手
+        copy_model_row = QHBoxLayout()
+        copy_model_row.setSpacing(10)
+        copy_model_label = QLabel("文案模型:")
+        copy_model_label.setFixedWidth(160)
+        copy_model_row.addWidget(copy_model_label)
+        self.ai_copywriter_model_combo = QComboBox()
+        copy_model_row.addWidget(self.ai_copywriter_model_combo)
+        layout.addLayout(copy_model_row)
+
+        copy_provider_row = QHBoxLayout()
+        copy_provider_row.setSpacing(10)
+        copy_provider_label = QLabel("文案供应商:")
+        copy_provider_label.setFixedWidth(160)
+        copy_provider_row.addWidget(copy_provider_label)
+        self.ai_copywriter_provider_combo = QComboBox()
+        self.ai_copywriter_provider_combo.addItem("默认", "")
+        self.ai_copywriter_provider_combo.addItem("豆包/火山", "doubao")
+        self.ai_copywriter_provider_combo.addItem("千问/通义", "qwen")
+        self.ai_copywriter_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_copy_provider = (getattr(config, "AI_COPYWRITER_PROVIDER", "") or "").strip()
+        idx_copy_provider = self.ai_copywriter_provider_combo.findData(cur_copy_provider)
+        self.ai_copywriter_provider_combo.setCurrentIndex(idx_copy_provider if idx_copy_provider >= 0 else 0)
+        copy_provider_row.addWidget(self.ai_copywriter_provider_combo)
+        layout.addLayout(copy_provider_row)
+
+        try:
+            self.ai_copywriter_provider_combo.currentIndexChanged.connect(self._refresh_task_model_combos)
+        except Exception:
+            pass
+
+        copy_base_row = QHBoxLayout()
+        copy_base_row.setSpacing(10)
+        copy_base_label = QLabel("文案 Base URL:")
+        copy_base_label.setFixedWidth(160)
+        copy_base_row.addWidget(copy_base_label)
+        self.ai_copywriter_base_url_input = QLineEdit(getattr(config, "AI_COPYWRITER_BASE_URL", ""))
+        copy_base_row.addWidget(self.ai_copywriter_base_url_input)
+        advanced_layout.addLayout(copy_base_row)
+
+        copy_key_row = QHBoxLayout()
+        copy_key_row.setSpacing(10)
+        copy_key_label = QLabel("文案 API Key:")
+        copy_key_label.setFixedWidth(160)
+        copy_key_row.addWidget(copy_key_label)
+        self.ai_copywriter_api_key_input = QLineEdit(getattr(config, "AI_COPYWRITER_API_KEY", ""))
+        self.ai_copywriter_api_key_input.setEchoMode(QLineEdit.Password)
+        copy_key_row.addWidget(self.ai_copywriter_api_key_input)
+        advanced_layout.addLayout(copy_key_row)
+
+        # 二创脚本
+        factory_model_row = QHBoxLayout()
+        factory_model_row.setSpacing(10)
+        factory_model_label = QLabel("二创模型:")
+        factory_model_label.setFixedWidth(160)
+        factory_model_row.addWidget(factory_model_label)
+        self.ai_factory_model_combo = QComboBox()
+        factory_model_row.addWidget(self.ai_factory_model_combo)
+        layout.addLayout(factory_model_row)
+
+        factory_provider_row = QHBoxLayout()
+        factory_provider_row.setSpacing(10)
+        factory_provider_label = QLabel("二创供应商:")
+        factory_provider_label.setFixedWidth(160)
+        factory_provider_row.addWidget(factory_provider_label)
+        self.ai_factory_provider_combo = QComboBox()
+        self.ai_factory_provider_combo.addItem("默认", "")
+        self.ai_factory_provider_combo.addItem("豆包/火山", "doubao")
+        self.ai_factory_provider_combo.addItem("千问/通义", "qwen")
+        self.ai_factory_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_factory_provider = (getattr(config, "AI_FACTORY_PROVIDER", "") or "").strip()
+        idx_factory_provider = self.ai_factory_provider_combo.findData(cur_factory_provider)
+        self.ai_factory_provider_combo.setCurrentIndex(idx_factory_provider if idx_factory_provider >= 0 else 0)
+        factory_provider_row.addWidget(self.ai_factory_provider_combo)
+        layout.addLayout(factory_provider_row)
+
+        try:
+            self.ai_factory_provider_combo.currentIndexChanged.connect(self._refresh_task_model_combos)
+        except Exception:
+            pass
+
+        factory_base_row = QHBoxLayout()
+        factory_base_row.setSpacing(10)
+        factory_base_label = QLabel("二创 Base URL:")
+        factory_base_label.setFixedWidth(160)
+        factory_base_row.addWidget(factory_base_label)
+        self.ai_factory_base_url_input = QLineEdit(getattr(config, "AI_FACTORY_BASE_URL", ""))
+        factory_base_row.addWidget(self.ai_factory_base_url_input)
+        advanced_layout.addLayout(factory_base_row)
+
+        factory_key_row = QHBoxLayout()
+        factory_key_row.setSpacing(10)
+        factory_key_label = QLabel("二创 API Key:")
+        factory_key_label.setFixedWidth(160)
+        factory_key_row.addWidget(factory_key_label)
+        self.ai_factory_api_key_input = QLineEdit(getattr(config, "AI_FACTORY_API_KEY", ""))
+        self.ai_factory_api_key_input.setEchoMode(QLineEdit.Password)
+        factory_key_row.addWidget(self.ai_factory_api_key_input)
+        advanced_layout.addLayout(factory_key_row)
+
+        # 时间轴脚本
+        timeline_model_row = QHBoxLayout()
+        timeline_model_row.setSpacing(10)
+        timeline_model_label = QLabel("时间轴模型:")
+        timeline_model_label.setFixedWidth(160)
+        timeline_model_row.addWidget(timeline_model_label)
+        self.ai_timeline_model_combo = QComboBox()
+        timeline_model_row.addWidget(self.ai_timeline_model_combo)
+        layout.addLayout(timeline_model_row)
+
+        timeline_provider_row = QHBoxLayout()
+        timeline_provider_row.setSpacing(10)
+        timeline_provider_label = QLabel("时间轴供应商:")
+        timeline_provider_label.setFixedWidth(160)
+        timeline_provider_row.addWidget(timeline_provider_label)
+        self.ai_timeline_provider_combo = QComboBox()
+        self.ai_timeline_provider_combo.addItem("默认", "")
+        self.ai_timeline_provider_combo.addItem("豆包/火山", "doubao")
+        self.ai_timeline_provider_combo.addItem("千问/通义", "qwen")
+        self.ai_timeline_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_timeline_provider = (getattr(config, "AI_TIMELINE_PROVIDER", "") or "").strip()
+        idx_timeline_provider = self.ai_timeline_provider_combo.findData(cur_timeline_provider)
+        self.ai_timeline_provider_combo.setCurrentIndex(idx_timeline_provider if idx_timeline_provider >= 0 else 0)
+        timeline_provider_row.addWidget(self.ai_timeline_provider_combo)
+        layout.addLayout(timeline_provider_row)
+
+        try:
+            self.ai_timeline_provider_combo.currentIndexChanged.connect(self._refresh_task_model_combos)
+        except Exception:
+            pass
+
+        timeline_base_row = QHBoxLayout()
+        timeline_base_row.setSpacing(10)
+        timeline_base_label = QLabel("时间轴 Base URL:")
+        timeline_base_label.setFixedWidth(160)
+        timeline_base_row.addWidget(timeline_base_label)
+        self.ai_timeline_base_url_input = QLineEdit(getattr(config, "AI_TIMELINE_BASE_URL", ""))
+        timeline_base_row.addWidget(self.ai_timeline_base_url_input)
+        advanced_layout.addLayout(timeline_base_row)
+
+        timeline_key_row = QHBoxLayout()
+        timeline_key_row.setSpacing(10)
+        timeline_key_label = QLabel("时间轴 API Key:")
+        timeline_key_label.setFixedWidth(160)
+        timeline_key_row.addWidget(timeline_key_label)
+        self.ai_timeline_api_key_input = QLineEdit(getattr(config, "AI_TIMELINE_API_KEY", ""))
+        self.ai_timeline_api_key_input.setEchoMode(QLineEdit.Password)
+        timeline_key_row.addWidget(self.ai_timeline_api_key_input)
+        advanced_layout.addLayout(timeline_key_row)
+
+        # 图转视频
+        photo_model_row = QHBoxLayout()
+        photo_model_row.setSpacing(10)
+        photo_model_label = QLabel("图转视频模型:")
+        photo_model_label.setFixedWidth(160)
+        photo_model_row.addWidget(photo_model_label)
+        self.ai_photo_model_combo = QComboBox()
+        photo_model_row.addWidget(self.ai_photo_model_combo)
+        layout.addLayout(photo_model_row)
+
+        photo_provider_row = QHBoxLayout()
+        photo_provider_row.setSpacing(10)
+        photo_provider_label = QLabel("图转视频供应商:")
+        photo_provider_label.setFixedWidth(160)
+        photo_provider_row.addWidget(photo_provider_label)
+        self.ai_photo_provider_combo = QComboBox()
+        self.ai_photo_provider_combo.addItem("默认", "")
+        self.ai_photo_provider_combo.addItem("豆包/火山", "doubao")
+        self.ai_photo_provider_combo.addItem("千问/通义", "qwen")
+        self.ai_photo_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_photo_provider = (getattr(config, "AI_PHOTO_PROVIDER", "") or "").strip()
+        idx_photo_provider = self.ai_photo_provider_combo.findData(cur_photo_provider)
+        self.ai_photo_provider_combo.setCurrentIndex(idx_photo_provider if idx_photo_provider >= 0 else 0)
+        photo_provider_row.addWidget(self.ai_photo_provider_combo)
+        layout.addLayout(photo_provider_row)
+
+        try:
+            self.ai_photo_provider_combo.currentIndexChanged.connect(self._refresh_task_model_combos)
+        except Exception:
+            pass
+
+        photo_base_row = QHBoxLayout()
+        photo_base_row.setSpacing(10)
+        photo_base_label = QLabel("图转视频 Base URL:")
+        photo_base_label.setFixedWidth(160)
+        photo_base_row.addWidget(photo_base_label)
+        self.ai_photo_base_url_input = QLineEdit(getattr(config, "AI_PHOTO_BASE_URL", ""))
+        photo_base_row.addWidget(self.ai_photo_base_url_input)
+        advanced_layout.addLayout(photo_base_row)
+
+        photo_key_row = QHBoxLayout()
+        photo_key_row.setSpacing(10)
+        photo_key_label = QLabel("图转视频 API Key:")
+        photo_key_label.setFixedWidth(160)
+        photo_key_row.addWidget(photo_key_label)
+        self.ai_photo_api_key_input = QLineEdit(getattr(config, "AI_PHOTO_API_KEY", ""))
+        self.ai_photo_api_key_input.setEchoMode(QLineEdit.Password)
+        photo_key_row.addWidget(self.ai_photo_api_key_input)
+        advanced_layout.addLayout(photo_key_row)
+
+        # 视觉实验室
+        vision_model_row = QHBoxLayout()
+        vision_model_row.setSpacing(10)
+        vision_model_label = QLabel("视觉模型:")
+        vision_model_label.setFixedWidth(160)
+        vision_model_row.addWidget(vision_model_label)
+        self.ai_vision_model_combo = QComboBox()
+        vision_model_row.addWidget(self.ai_vision_model_combo)
+        layout.addLayout(vision_model_row)
+
+        vision_provider_row = QHBoxLayout()
+        vision_provider_row.setSpacing(10)
+        vision_provider_label = QLabel("视觉供应商:")
+        vision_provider_label.setFixedWidth(160)
+        vision_provider_row.addWidget(vision_provider_label)
+        self.ai_vision_provider_combo = QComboBox()
+        self.ai_vision_provider_combo.addItem("默认", "")
+        self.ai_vision_provider_combo.addItem("豆包/火山", "doubao")
+        self.ai_vision_provider_combo.addItem("千问/通义", "qwen")
+        self.ai_vision_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_vision_provider = (getattr(config, "AI_VISION_PROVIDER", "") or "").strip()
+        idx_vision_provider = self.ai_vision_provider_combo.findData(cur_vision_provider)
+        self.ai_vision_provider_combo.setCurrentIndex(idx_vision_provider if idx_vision_provider >= 0 else 0)
+        vision_provider_row.addWidget(self.ai_vision_provider_combo)
+        layout.addLayout(vision_provider_row)
+
+        try:
+            self.ai_vision_provider_combo.currentIndexChanged.connect(self._refresh_task_model_combos)
+        except Exception:
+            pass
+
+        vision_base_row = QHBoxLayout()
+        vision_base_row.setSpacing(10)
+        vision_base_label = QLabel("视觉 Base URL:")
+        vision_base_label.setFixedWidth(160)
+        vision_base_row.addWidget(vision_base_label)
+        self.ai_vision_base_url_input = QLineEdit(getattr(config, "AI_VISION_BASE_URL", ""))
+        vision_base_row.addWidget(self.ai_vision_base_url_input)
+        advanced_layout.addLayout(vision_base_row)
+
+        vision_key_row = QHBoxLayout()
+        vision_key_row.setSpacing(10)
+        vision_key_label = QLabel("视觉 API Key:")
+        vision_key_label.setFixedWidth(160)
+        vision_key_row.addWidget(vision_key_label)
+        self.ai_vision_api_key_input = QLineEdit(getattr(config, "AI_VISION_API_KEY", ""))
+        self.ai_vision_api_key_input.setEchoMode(QLineEdit.Password)
+        vision_key_row.addWidget(self.ai_vision_api_key_input)
+        advanced_layout.addLayout(vision_key_row)
+
+        # 初始化任务级模型下拉
+        self._refresh_task_model_combos()
+
+        layout.addWidget(self.ai_advanced_frame)
 
         frame.setLayout(layout)
         return frame
@@ -286,9 +677,205 @@ class SettingsPanel(QWidget):
         except Exception:
             pass
 
+    def _provider_title(self, provider: str) -> str:
+        p = (provider or "").strip().lower()
+        mapping = {
+            "doubao": "豆包/火山",
+            "qwen": "千问/通义",
+            "deepseek": "DeepSeek",
+        }
+        return mapping.get(p, provider or "供应商")
+
+    def _fill_task_model_combo(self, combo: QComboBox, provider: str, fallback: str) -> None:
+        models = get_provider_models(provider) if provider else []
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            clean_models = [m for m in (models or []) if m]
+            if clean_models:
+                combo.addItems(clean_models)
+            else:
+                if fallback:
+                    combo.addItem(fallback)
+                else:
+                    combo.addItem("（未获取模型）")
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _refresh_task_model_combos(self) -> None:
+        # 文案
+        try:
+            p = self.ai_copywriter_provider_combo.currentData() or ""
+        except Exception:
+            p = ""
+        fallback = (getattr(config, "AI_COPYWRITER_MODEL", "") or "").strip() or (getattr(config, "AI_MODEL", "") or "").strip()
+        self._fill_task_model_combo(self.ai_copywriter_model_combo, p, fallback)
+
+        # 二创
+        try:
+            p = self.ai_factory_provider_combo.currentData() or ""
+        except Exception:
+            p = ""
+        fallback = (getattr(config, "AI_FACTORY_MODEL", "") or "").strip() or (getattr(config, "AI_MODEL", "") or "").strip()
+        self._fill_task_model_combo(self.ai_factory_model_combo, p, fallback)
+
+        # 时间轴
+        try:
+            p = self.ai_timeline_provider_combo.currentData() or ""
+        except Exception:
+            p = ""
+        fallback = (getattr(config, "AI_TIMELINE_MODEL", "") or "").strip() or (getattr(config, "AI_MODEL", "") or "").strip()
+        self._fill_task_model_combo(self.ai_timeline_model_combo, p, fallback)
+
+        # 图转视频
+        try:
+            p = self.ai_photo_provider_combo.currentData() or ""
+        except Exception:
+            p = ""
+        fallback = (getattr(config, "AI_PHOTO_MODEL", "") or "").strip() or (getattr(config, "AI_MODEL", "") or "").strip()
+        self._fill_task_model_combo(self.ai_photo_model_combo, p, fallback)
+
+        # 视觉
+        try:
+            p = self.ai_vision_provider_combo.currentData() or ""
+        except Exception:
+            p = ""
+        fallback = (getattr(config, "AI_VISION_MODEL", "") or "").strip() or (getattr(config, "AI_MODEL", "") or "").strip()
+        self._fill_task_model_combo(self.ai_vision_model_combo, p, fallback)
+
+    def _auto_refresh_providers_on_startup(self) -> None:
+        """启动时自动刷新一次供应商模型（若 key/base 已配置）。"""
+        for provider in ("doubao", "qwen", "deepseek"):
+            try:
+                api_key, base_url = self._get_provider_inputs(provider)
+                if not api_key:
+                    continue
+                combo = (self._provider_model_combos or {}).get(provider)
+                if combo is None:
+                    continue
+                self._fetch_models_with(self._provider_title(provider), api_key, base_url, combo)
+                models = [combo.itemText(i) for i in range(combo.count()) if combo.itemText(i)]
+                models = [m for m in models if "未获取" not in m]
+                if models:
+                    set_provider_models(provider, models, ok=True, message="启动自动刷新")
+                else:
+                    set_provider_status(provider, False, "启动未获取到模型")
+            except Exception as e:
+                set_provider_status(provider, False, str(e))
+            finally:
+                self._refresh_provider_card(provider)
+        try:
+            self._refresh_task_model_combos()
+        except Exception:
+            pass
+
+    def _format_status_text(self, provider: str) -> str:
+        status = get_provider_status(provider)
+        ok = bool(status.get("ok"))
+        msg = status.get("message", "") or ""
+        ts = int(status.get("updated_at") or 0)
+        time_text = ""
+        if ts > 0:
+            try:
+                time_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+            except Exception:
+                time_text = ""
+        if ok:
+            return f"状态：已连通{(' · ' + time_text) if time_text else ''}"
+        if ts > 0:
+            tail = f" · {time_text}" if time_text else ""
+            return f"状态：失败{(' - ' + msg) if msg else ''}{tail}"
+        return "状态：未检测"
+
+    def _refresh_provider_card(self, provider: str) -> None:
+        label = (self._provider_status_labels or {}).get(provider)
+        if label:
+            label.setText(self._format_status_text(provider))
+
+        combo = (self._provider_model_combos or {}).get(provider)
+        if not combo:
+            return
+        models = get_provider_models(provider)
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            if models:
+                combo.addItems(models)
+            else:
+                combo.addItem("（未获取模型）")
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _test_provider(self, provider: str) -> None:
+        title = self._provider_title(provider)
+        api_key, base_url = self._get_provider_inputs(provider)
+        models = get_provider_models(provider)
+        probe_model = ""
+        if models:
+            probe_model = models[0]
+        else:
+            probe_model = (self.ai_model_input.text() if hasattr(self, "ai_model_input") else "").strip()
+        try:
+            self._test_ai_connection_with(title, api_key, base_url, model=probe_model)
+            set_provider_status(provider, True, "连通正常")
+        except Exception as e:
+            set_provider_status(provider, False, str(e))
+            QMessageBox.critical(self, "连接失败", f"{title} 连接失败：{e}")
+        finally:
+            self._refresh_provider_card(provider)
+
+    def _fetch_provider_models(self, provider: str) -> None:
+        title = self._provider_title(provider)
+        api_key, base_url = self._get_provider_inputs(provider)
+        combo = (self._provider_model_combos or {}).get(provider)
+        if combo is None:
+            return
+        try:
+            self._fetch_models_with(title, api_key, base_url, combo)
+            models = [combo.itemText(i) for i in range(combo.count()) if combo.itemText(i)]
+            models = [m for m in models if "未获取" not in m]
+            if models:
+                set_provider_models(provider, models, ok=True, message="模型已更新")
+            else:
+                set_provider_status(provider, False, "未获取到模型")
+        except Exception as e:
+            set_provider_status(provider, False, str(e))
+            QMessageBox.critical(self, "失败", f"{title} 获取模型失败：{e}")
+        finally:
+            self._refresh_provider_card(provider)
+
     def _build_ai_client(self):
         """构造 OpenAI 兼容客户端（DeepSeek/兼容服务也可用）。"""
         return self._build_ai_client_for(self.ai_api_key_input, self.ai_base_url_input, missing_key_hint="请先填写全局 API Key")
+
+    def _build_ai_client_raw(self, api_key: str, base_url: str):
+        """根据字符串构造 OpenAI 兼容客户端。"""
+        try:
+            import openai
+        except Exception as e:
+            raise RuntimeError(f"缺少 openai 依赖：{e}")
+        if not api_key:
+            raise ValueError("请先填写所选供应商的 API Key")
+        if base_url:
+            return openai.OpenAI(api_key=api_key, base_url=base_url)
+        return openai.OpenAI(api_key=api_key)
+
+    def _get_provider_inputs(self, provider: str) -> tuple[str, str]:
+        """从 UI 获取供应商配置（api_key, base_url）。"""
+        p = (provider or "").strip().lower()
+        if p == "doubao":
+            return (self.ai_doubao_api_key_input.text().strip(), self.ai_doubao_base_url_input.text().strip())
+        if p == "qwen":
+            return (self.ai_qwen_api_key_input.text().strip(), self.ai_qwen_base_url_input.text().strip())
+        if p == "deepseek":
+            return (self.ai_deepseek_api_key_input.text().strip(), self.ai_deepseek_base_url_input.text().strip())
+        return ("", "")
 
     def _build_ai_client_for(self, api_key_widget: QLineEdit, base_url_widget: QLineEdit, missing_key_hint: str = "请先填写 AI_API_KEY"):
         """根据输入框构造 OpenAI 兼容客户端。"""
@@ -397,7 +984,14 @@ class SettingsPanel(QWidget):
         QApplication.processEvents()
 
         try:
-            client = self._build_ai_client()
+            provider = ""
+            if hasattr(self, "ai_provider_pick_combo"):
+                provider = self.ai_provider_pick_combo.currentData() or ""
+            if provider:
+                api_key, base_url = self._get_provider_inputs(provider)
+                client = self._build_ai_client_raw(api_key, base_url)
+            else:
+                client = self._build_ai_client()
             model = (self.ai_model_input.text() or "").strip()
             try:
                 models = client.models.list()
@@ -432,7 +1026,14 @@ class SettingsPanel(QWidget):
         QApplication.processEvents()
 
         try:
-            client = self._build_ai_client()
+            provider = ""
+            if hasattr(self, "ai_provider_pick_combo"):
+                provider = self.ai_provider_pick_combo.currentData() or ""
+            if provider:
+                api_key, base_url = self._get_provider_inputs(provider)
+                client = self._build_ai_client_raw(api_key, base_url)
+            else:
+                client = self._build_ai_client()
             models = client.models.list()
             items = []
             for m in (getattr(models, "data", []) or []):
@@ -564,6 +1165,31 @@ class SettingsPanel(QWidget):
         self.theme_combo.setCurrentIndex(idx if idx >= 0 else 0)
         theme_layout.addWidget(self.theme_combo)
         layout.addLayout(theme_layout)
+
+        # Update
+        update_provider_row = QHBoxLayout()
+        update_provider_row.setSpacing(10)
+        update_provider_label = QLabel("更新源:")
+        update_provider_label.setFixedWidth(160)
+        update_provider_row.addWidget(update_provider_label)
+        self.update_provider_combo = QComboBox()
+        self.update_provider_combo.addItem("GitHub", "github")
+        self.update_provider_combo.addItem("Gitee", "gitee")
+        cur_update_provider = (getattr(config, "UPDATE_PROVIDER", "github") or "github").strip().lower()
+        idx_update = self.update_provider_combo.findData(cur_update_provider)
+        self.update_provider_combo.setCurrentIndex(idx_update if idx_update >= 0 else 0)
+        update_provider_row.addWidget(self.update_provider_combo)
+        layout.addLayout(update_provider_row)
+
+        update_url_row = QHBoxLayout()
+        update_url_row.setSpacing(10)
+        update_url_label = QLabel("更新检查 URL:")
+        update_url_label.setFixedWidth(160)
+        update_url_row.addWidget(update_url_label)
+        self.update_check_url_input = QLineEdit(getattr(config, "UPDATE_CHECK_URL", ""))
+        update_url_row.addWidget(self.update_check_url_input)
+        layout.addLayout(update_url_row)
+
         
         layout.addStretch()
         frame.setLayout(layout)
@@ -663,6 +1289,73 @@ class SettingsPanel(QWidget):
         self.tts_speed_input.setPlaceholderText("1.0=正常；1.1=加速10%")
         speed_row.addWidget(self.tts_speed_input)
         layout.addLayout(speed_row)
+
+        # 情绪指令（豆包 TTS 2.0）
+        emo_preset_row = QHBoxLayout()
+        emo_preset_row.setSpacing(10)
+        emo_preset_label = QLabel("情绪指令预设:")
+        emo_preset_label.setFixedWidth(160)
+        emo_preset_row.addWidget(emo_preset_label)
+        self.tts_emotion_preset_combo = QComboBox()
+        self.tts_emotion_preset_combo.addItem("不启用", "")
+        self.tts_emotion_preset_combo.addItem("热情带货", "用热情、外放、强转化的带货口播语气说")
+        self.tts_emotion_preset_combo.addItem("沉稳讲解", "用沉稳、专业、清晰讲解的语气说")
+        self.tts_emotion_preset_combo.addItem("轻松种草", "用轻松、自然、亲切种草的语气说")
+        self.tts_emotion_preset_combo.addItem("夸张吸睛", "用夸张、情绪饱满、吸睛的语气说")
+        self.tts_emotion_preset_combo.addItem("剧情对白", "用剧情对白的语气说，像在表演短剧")
+        self.tts_emotion_preset_combo.addItem("情绪爆发", "用情绪爆发、强烈起伏的语气说")
+        self.tts_emotion_preset_combo.addItem("温柔ASMR", "用轻声、温柔、贴耳的ASMR语气说")
+        self.tts_emotion_preset_combo.addItem("冷静测评", "用冷静、客观、测评解读的语气说")
+        self.tts_emotion_preset_combo.addItem("权威讲解", "用权威、稳重、可信赖的讲解语气说")
+        cur_preset = (getattr(config, "TTS_EMOTION_PRESET", "") or "").strip()
+        idx_preset = self.tts_emotion_preset_combo.findData(cur_preset)
+        self.tts_emotion_preset_combo.setCurrentIndex(idx_preset if idx_preset >= 0 else 0)
+        emo_preset_row.addWidget(self.tts_emotion_preset_combo)
+        layout.addLayout(emo_preset_row)
+
+        # 场景模式
+        scene_row = QHBoxLayout()
+        scene_row.setSpacing(10)
+        scene_label = QLabel("场景模式:")
+        scene_label.setFixedWidth(160)
+        scene_row.addWidget(scene_label)
+        self.tts_scene_combo = QComboBox()
+        self.tts_scene_combo.addItem("不启用", "")
+        self.tts_scene_combo.addItem("带货转化", "commerce")
+        self.tts_scene_combo.addItem("评测解读", "review")
+        self.tts_scene_combo.addItem("开箱体验", "unboxing")
+        self.tts_scene_combo.addItem("剧情对白", "story")
+        self.tts_scene_combo.addItem("口播讲解", "talk")
+        cur_scene = (getattr(config, "TTS_SCENE_MODE", "") or "").strip()
+        idx_scene = self.tts_scene_combo.findData(cur_scene)
+        self.tts_scene_combo.setCurrentIndex(idx_scene if idx_scene >= 0 else 0)
+        scene_row.addWidget(self.tts_scene_combo)
+        layout.addLayout(scene_row)
+
+        emo_intensity_row = QHBoxLayout()
+        emo_intensity_row.setSpacing(10)
+        emo_intensity_label = QLabel("情绪强度:")
+        emo_intensity_label.setFixedWidth(160)
+        emo_intensity_row.addWidget(emo_intensity_label)
+        self.tts_emotion_intensity_combo = QComboBox()
+        self.tts_emotion_intensity_combo.addItem("轻", "轻")
+        self.tts_emotion_intensity_combo.addItem("中", "中")
+        self.tts_emotion_intensity_combo.addItem("强", "强")
+        cur_intensity = (getattr(config, "TTS_EMOTION_INTENSITY", "中") or "中").strip()
+        idx_intensity = self.tts_emotion_intensity_combo.findData(cur_intensity)
+        self.tts_emotion_intensity_combo.setCurrentIndex(idx_intensity if idx_intensity >= 0 else 1)
+        emo_intensity_row.addWidget(self.tts_emotion_intensity_combo)
+        layout.addLayout(emo_intensity_row)
+
+        emo_custom_row = QHBoxLayout()
+        emo_custom_row.setSpacing(10)
+        emo_custom_label = QLabel("自定义指令:")
+        emo_custom_label.setFixedWidth(160)
+        emo_custom_row.addWidget(emo_custom_label)
+        self.tts_emotion_custom_input = QLineEdit(getattr(config, "TTS_EMOTION_CUSTOM", ""))
+        self.tts_emotion_custom_input.setPlaceholderText("例如：用撒娇、轻声、带点期待的语气说")
+        emo_custom_row.addWidget(self.tts_emotion_custom_input)
+        layout.addLayout(emo_custom_row)
 
         # 火山（按官方文档：APP ID + Access Token + Secret Key）
         volc_endpoint_row = QHBoxLayout()
@@ -892,8 +1585,148 @@ class SettingsPanel(QWidget):
         self.strip_metadata_default_checkbox.setChecked(getattr(config, "VIDEO_REMIX_STRIP_METADATA", True))
         layout.addWidget(self.strip_metadata_default_checkbox)
 
+        cloud_title = QLabel("云端图转视频（真实生成）")
+        cloud_title.setObjectName("h3")
+        layout.addWidget(cloud_title)
+
+        self.video_cloud_enabled_checkbox = QCheckBox("启用云端图转视频（将替代本地图片流合成）")
+        self.video_cloud_enabled_checkbox.setChecked(bool(getattr(config, "VIDEO_CLOUD_ENABLED", False)))
+        layout.addWidget(self.video_cloud_enabled_checkbox)
+
+        cloud_key_row = QHBoxLayout()
+        cloud_key_row.setSpacing(10)
+        cloud_key_label = QLabel("VIDEO_CLOUD_API_KEY:")
+        cloud_key_label.setFixedWidth(160)
+        cloud_key_row.addWidget(cloud_key_label)
+        self.video_cloud_api_key_input = QLineEdit(getattr(config, "VIDEO_CLOUD_API_KEY", ""))
+        self.video_cloud_api_key_input.setEchoMode(QLineEdit.Password)
+        cloud_key_row.addWidget(self.video_cloud_api_key_input)
+        layout.addLayout(cloud_key_row)
+
+        submit_row = QHBoxLayout()
+        submit_row.setSpacing(10)
+        submit_label = QLabel("提交接口 URL:")
+        submit_label.setFixedWidth(160)
+        submit_row.addWidget(submit_label)
+        self.video_cloud_submit_input = QLineEdit(getattr(config, "VIDEO_CLOUD_SUBMIT_URL", ""))
+        self.video_cloud_submit_input.setPlaceholderText("https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks")
+        submit_row.addWidget(self.video_cloud_submit_input)
+        layout.addLayout(submit_row)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        status_label = QLabel("查询接口 URL:")
+        status_label.setFixedWidth(160)
+        status_row.addWidget(status_label)
+        self.video_cloud_status_input = QLineEdit(getattr(config, "VIDEO_CLOUD_STATUS_URL", ""))
+        self.video_cloud_status_input.setPlaceholderText("可用 {task_id} 占位")
+        status_row.addWidget(self.video_cloud_status_input)
+        layout.addLayout(status_row)
+
+        model_row = QHBoxLayout()
+        model_row.setSpacing(10)
+        model_label = QLabel("模型 ID:")
+        model_label.setFixedWidth(160)
+        model_row.addWidget(model_label)
+        self.video_cloud_model_input = QLineEdit(getattr(config, "VIDEO_CLOUD_MODEL", ""))
+        model_row.addWidget(self.video_cloud_model_input)
+        layout.addLayout(model_row)
+
+        quality_row = QHBoxLayout()
+        quality_row.setSpacing(10)
+        quality_label = QLabel("质量档位:")
+        quality_label.setFixedWidth(160)
+        quality_row.addWidget(quality_label)
+        self.video_cloud_quality_combo = QComboBox()
+        self.video_cloud_quality_combo.addItem("低（推荐）", "low")
+        self.video_cloud_quality_combo.addItem("中", "medium")
+        self.video_cloud_quality_combo.addItem("高", "high")
+        cur_q = (getattr(config, "VIDEO_CLOUD_QUALITY", "low") or "low").strip()
+        idx_q = self.video_cloud_quality_combo.findData(cur_q)
+        self.video_cloud_quality_combo.setCurrentIndex(idx_q if idx_q >= 0 else 0)
+        quality_row.addWidget(self.video_cloud_quality_combo)
+        layout.addLayout(quality_row)
+
+        cloud_action_row = QHBoxLayout()
+        self.video_cloud_test_btn = QPushButton("测试云端图转视频")
+        self.video_cloud_test_btn.clicked.connect(self._test_video_cloud_api)
+        cloud_action_row.addWidget(self.video_cloud_test_btn)
+        cloud_action_row.addStretch(1)
+        layout.addLayout(cloud_action_row)
+
         frame.setLayout(layout)
         return frame
+
+    def _test_video_cloud_api(self) -> None:
+        """测试云端图转视频接口连通性（轻量提交）。"""
+        submit_url = (self.video_cloud_submit_input.text() if hasattr(self, "video_cloud_submit_input") else "").strip()
+        api_key = (self.video_cloud_api_key_input.text() if hasattr(self, "video_cloud_api_key_input") else "").strip()
+        model = (self.video_cloud_model_input.text() if hasattr(self, "video_cloud_model_input") else "").strip()
+        if not submit_url:
+            QMessageBox.warning(self, "参数缺失", "请先填写提交接口 URL")
+            return
+        if not api_key:
+            QMessageBox.warning(self, "参数缺失", "请先填写 VIDEO_CLOUD_API_KEY")
+            return
+        if not model:
+            QMessageBox.warning(self, "参数缺失", "请先填写模型 ID")
+            return
+
+        # 生成 >=300px 的测试图片（避免 1x1 被拒绝）
+        image_data = ""
+        try:
+            img = QImage(320, 320, QImage.Format_RGB32)
+            img.fill(QColor(255, 255, 255))
+            buf = QBuffer()
+            buf.open(QBuffer.ReadWrite)
+            img.save(buf, "PNG")
+            raw = bytes(buf.data())
+            b64 = base64.b64encode(raw).decode("utf-8")
+            image_data = f"data:image/png;base64,{b64}"
+        except Exception:
+            image_data = ""
+        if not image_data:
+            QMessageBox.warning(self, "失败", "生成测试图片失败，无法测试连通性")
+            if btn:
+                btn.setEnabled(True)
+                btn.setText("测试云端图转视频")
+            return
+        payload = {
+            "model": model,
+            "content": [
+                {"type": "text", "text": "ping"},
+                {"type": "image_url", "image_url": {"url": image_data}, "role": "first_frame"},
+            ],
+            "ratio": "9:16",
+            "duration": 4,
+            "resolution": "480p",
+            "watermark": False,
+            "camera_fixed": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        btn = self.sender()
+        if btn:
+            btn.setEnabled(False)
+            btn.setText("测试中...")
+        QApplication.processEvents()
+
+        try:
+            resp = requests.post(submit_url, json=payload, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                QMessageBox.information(self, "成功", "云端图转视频接口连通正常（已成功提交测试任务）。")
+            else:
+                text = (resp.text or "")[:200]
+                QMessageBox.warning(self, "失败", f"提交失败 HTTP {resp.status_code}: {text}")
+        except Exception as e:
+            QMessageBox.critical(self, "异常", f"测试失败：{e}")
+        finally:
+            if btn:
+                btn.setEnabled(True)
+                btn.setText("测试云端图转视频")
     
     def save_settings(self):
         """保存设置到 .env，并热更新内存配置。"""
@@ -918,6 +1751,65 @@ class SettingsPanel(QWidget):
             config.set_config("AI_API_KEY", ai_api_key, persist=True, hot_reload=False)
             config.set_config("AI_SYSTEM_PROMPT", ai_role, persist=True, hot_reload=False)
 
+            if hasattr(self, "ai_doubao_api_key_input"):
+                config.set_config("AI_DOUBAO_API_KEY", self.ai_doubao_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_doubao_base_url_input"):
+                config.set_config("AI_DOUBAO_BASE_URL", self.ai_doubao_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_qwen_api_key_input"):
+                config.set_config("AI_QWEN_API_KEY", self.ai_qwen_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_qwen_base_url_input"):
+                config.set_config("AI_QWEN_BASE_URL", self.ai_qwen_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_deepseek_api_key_input"):
+                config.set_config("AI_DEEPSEEK_API_KEY", self.ai_deepseek_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_deepseek_base_url_input"):
+                config.set_config("AI_DEEPSEEK_BASE_URL", self.ai_deepseek_base_url_input.text().strip(), persist=True, hot_reload=False)
+
+            # 任务级覆盖（可选）
+            if hasattr(self, "ai_copywriter_model_combo"):
+                config.set_config("AI_COPYWRITER_MODEL", self.ai_copywriter_model_combo.currentText().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_copywriter_base_url_input"):
+                config.set_config("AI_COPYWRITER_BASE_URL", self.ai_copywriter_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_copywriter_api_key_input"):
+                config.set_config("AI_COPYWRITER_API_KEY", self.ai_copywriter_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_copywriter_provider_combo"):
+                config.set_config("AI_COPYWRITER_PROVIDER", self.ai_copywriter_provider_combo.currentData() or "", persist=True, hot_reload=False)
+
+            if hasattr(self, "ai_factory_model_combo"):
+                config.set_config("AI_FACTORY_MODEL", self.ai_factory_model_combo.currentText().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_factory_base_url_input"):
+                config.set_config("AI_FACTORY_BASE_URL", self.ai_factory_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_factory_api_key_input"):
+                config.set_config("AI_FACTORY_API_KEY", self.ai_factory_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_factory_provider_combo"):
+                config.set_config("AI_FACTORY_PROVIDER", self.ai_factory_provider_combo.currentData() or "", persist=True, hot_reload=False)
+
+            if hasattr(self, "ai_timeline_model_combo"):
+                config.set_config("AI_TIMELINE_MODEL", self.ai_timeline_model_combo.currentText().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_timeline_base_url_input"):
+                config.set_config("AI_TIMELINE_BASE_URL", self.ai_timeline_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_timeline_api_key_input"):
+                config.set_config("AI_TIMELINE_API_KEY", self.ai_timeline_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_timeline_provider_combo"):
+                config.set_config("AI_TIMELINE_PROVIDER", self.ai_timeline_provider_combo.currentData() or "", persist=True, hot_reload=False)
+
+            if hasattr(self, "ai_photo_model_combo"):
+                config.set_config("AI_PHOTO_MODEL", self.ai_photo_model_combo.currentText().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_photo_base_url_input"):
+                config.set_config("AI_PHOTO_BASE_URL", self.ai_photo_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_photo_api_key_input"):
+                config.set_config("AI_PHOTO_API_KEY", self.ai_photo_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_photo_provider_combo"):
+                config.set_config("AI_PHOTO_PROVIDER", self.ai_photo_provider_combo.currentData() or "", persist=True, hot_reload=False)
+
+            if hasattr(self, "ai_vision_model_combo"):
+                config.set_config("AI_VISION_MODEL", self.ai_vision_model_combo.currentText().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_vision_base_url_input"):
+                config.set_config("AI_VISION_BASE_URL", self.ai_vision_base_url_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_vision_api_key_input"):
+                config.set_config("AI_VISION_API_KEY", self.ai_vision_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "ai_vision_provider_combo"):
+                config.set_config("AI_VISION_PROVIDER", self.ai_vision_provider_combo.currentData() or "", persist=True, hot_reload=False)
+
             # Downloader
             download_dir = self.download_dir_input.text().strip()
             config.set_config("DOWNLOAD_DIR", download_dir, persist=True, hot_reload=False)
@@ -929,11 +1821,29 @@ class SettingsPanel(QWidget):
             theme_mode = self.theme_combo.currentData() or "dark"
             config.set_config("THEME_MODE", theme_mode, persist=True, hot_reload=False)
 
+            if hasattr(self, "update_provider_combo"):
+                config.set_config("UPDATE_PROVIDER", self.update_provider_combo.currentData() or "github", persist=True, hot_reload=False)
+            if hasattr(self, "update_check_url_input"):
+                config.set_config("UPDATE_CHECK_URL", self.update_check_url_input.text().strip(), persist=True, hot_reload=False)
+
             # Video defaults
             config.set_config("VIDEO_DEEP_REMIX_ENABLED", "1" if self.deep_remix_default_checkbox.isChecked() else "0", persist=True, hot_reload=False)
             config.set_config("VIDEO_REMIX_MICRO_ZOOM", "1" if self.micro_zoom_default_checkbox.isChecked() else "0", persist=True, hot_reload=False)
             config.set_config("VIDEO_REMIX_ADD_NOISE", "1" if self.noise_default_checkbox.isChecked() else "0", persist=True, hot_reload=False)
             config.set_config("VIDEO_REMIX_STRIP_METADATA", "1" if self.strip_metadata_default_checkbox.isChecked() else "0", persist=True, hot_reload=False)
+
+            if hasattr(self, "video_cloud_enabled_checkbox"):
+                config.set_config("VIDEO_CLOUD_ENABLED", "true" if self.video_cloud_enabled_checkbox.isChecked() else "false", persist=True, hot_reload=False)
+            if hasattr(self, "video_cloud_api_key_input"):
+                config.set_config("VIDEO_CLOUD_API_KEY", self.video_cloud_api_key_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "video_cloud_submit_input"):
+                config.set_config("VIDEO_CLOUD_SUBMIT_URL", self.video_cloud_submit_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "video_cloud_status_input"):
+                config.set_config("VIDEO_CLOUD_STATUS_URL", self.video_cloud_status_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "video_cloud_model_input"):
+                config.set_config("VIDEO_CLOUD_MODEL", self.video_cloud_model_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "video_cloud_quality_combo"):
+                config.set_config("VIDEO_CLOUD_QUALITY", self.video_cloud_quality_combo.currentData() or "low", persist=True, hot_reload=False)
 
             # TTS
             if hasattr(self, "tts_provider_combo"):
@@ -944,6 +1854,14 @@ class SettingsPanel(QWidget):
                 config.set_config("TTS_VOICE", self.tts_voice_input.text().strip(), persist=True, hot_reload=False)
             if hasattr(self, "tts_speed_input"):
                 config.set_config("TTS_SPEED", self.tts_speed_input.text().strip() or "1.0", persist=True, hot_reload=False)
+            if hasattr(self, "tts_emotion_preset_combo"):
+                config.set_config("TTS_EMOTION_PRESET", self.tts_emotion_preset_combo.currentData() or "", persist=True, hot_reload=False)
+            if hasattr(self, "tts_emotion_intensity_combo"):
+                config.set_config("TTS_EMOTION_INTENSITY", self.tts_emotion_intensity_combo.currentData() or "中", persist=True, hot_reload=False)
+            if hasattr(self, "tts_emotion_custom_input"):
+                config.set_config("TTS_EMOTION_CUSTOM", self.tts_emotion_custom_input.text().strip(), persist=True, hot_reload=False)
+            if hasattr(self, "tts_scene_combo"):
+                config.set_config("TTS_SCENE_MODE", self.tts_scene_combo.currentData() or "", persist=True, hot_reload=False)
 
             if hasattr(self, "volc_endpoint_input"):
                 config.set_config("VOLC_TTS_ENDPOINT", self.volc_endpoint_input.text().strip(), persist=True, hot_reload=False)

@@ -84,6 +84,37 @@ def _extract_audio_base64(payload) -> str:
     return ""
 
 
+def _emotion_to_instruction(emotion: str) -> str:
+    """将情绪标签映射为豆包 TTS 2.0 语音指令。
+
+    说明：豆包 TTS 2.0 支持通过文本内嵌 [#指令] 控制语气/情绪。
+    - 输入可为英文情绪标签（happy/sad/angry/surprise/neutral）
+    - 也可直接传入自定义中文指令（不含包裹符号时自动加 [#...]）
+    """
+    emo = (emotion or "").strip()
+    if not emo:
+        return ""
+
+    # 如果调用方已经传入完整指令片段，直接透传
+    if emo.startswith("[#") and emo.endswith("]"):
+        return emo
+
+    mapping = {
+        "happy": "用开心、轻快、热情的语气说",
+        "sad": "用低落、缓慢、带点哽咽的语气说",
+        "angry": "用生气、强调、有压迫感的语气说",
+        "surprise": "用惊讶、语调上扬的语气说",
+        "neutral": "用平静、自然的语气说",
+    }
+
+    mapped = mapping.get(emo.lower())
+    if mapped:
+        return f"[# {mapped}]"
+
+    # 自定义情绪：自动加指令包装
+    return f"[# {emo}]"
+
+
 def synthesize_volcengine_token(
     text: str,
     out_path: Path,
@@ -130,9 +161,10 @@ def synthesize_volcengine_token(
         },
     }
 
-    # 情感参数（如 happy/sad/angry/surprise），留空则不传
-    if (emotion or "").strip():
-        payload["audio"]["emotion"] = (emotion or "").strip().lower()
+    # 豆包 TTS 2.0 情绪控制：优先使用“语音指令”
+    instruction = _emotion_to_instruction(emotion)
+    if instruction:
+        payload["request"]["text"] = f"{instruction}{text}"
 
     headers = {
         "Content-Type": "application/json",

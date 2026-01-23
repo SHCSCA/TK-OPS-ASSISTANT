@@ -25,7 +25,7 @@ class BaseWorker(QThread):
     log_signal = pyqtSignal(str)      # 发送日志消息到 UI (Legacy support)
     progress_signal = pyqtSignal(int)  # 发送进度 (0-100)
     error_signal = pyqtSignal(str)     # 发送错误消息
-    finished_signal = pyqtSignal()     # 任务完成信号
+    finished_signal = pyqtSignal(object)  # 任务完成信号 (Changed to accept object in V2.0 for flexibility, often sends result path or bool)
 
     # 新增：统一结果与完成信号（不破坏旧接口）
     data_signal = pyqtSignal(object)   # 统一结果载荷（list/dict/str 皆可）
@@ -123,16 +123,22 @@ class BaseWorker(QThread):
         """统一结束信号。
 
         - done_signal(ok, message)
-        - finished_signal()（兼容旧 UI）
+        - finished_signal(result) (若成功)
+        - error_signal(message) (若失败)
+        
+        V2 Update: 
+        - 成功时 finished_signal 携带结果 payload (str/object)
+        - 失败时自动触发 error_signal，避免 UI 收到 None 而 Crash
         """
         if self._finished_emitted:
             return
         self._finished_emitted = True
+        
         try:
-            self.done_signal.emit(bool(ok), str(message or ""))
-        except Exception:
-            pass
-        try:
-            self.finished_signal.emit()
+            self.done_signal.emit(ok, message)
+            if ok:
+                self.finished_signal.emit(message)
+            else:
+                self.error_signal.emit(message)
         except Exception:
             pass

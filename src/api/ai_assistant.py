@@ -11,6 +11,7 @@ import json
 from typing import Dict, List, Tuple
 
 import config
+from utils.ai_routing import resolve_ai_profile
 
 
 def _is_ark_base_url(base_url: str | None) -> bool:
@@ -84,11 +85,12 @@ def generate_tiktok_copy(desc_cn: str, tone: str, role_prompt: str = "", model: 
     if not desc_cn or not desc_cn.strip():
         raise ValueError("请先输入素材/产品的描述。")
 
-    api_key = ((getattr(config, "AI_API_KEY", "") or "").strip())
+    profile = resolve_ai_profile("copywriter", model_override=model)
+    api_key = (profile.get("api_key", "") or "").strip()
     if not api_key:
         raise ValueError("未配置 AI_API_KEY。请到【系统设置】里填写后再使用。")
 
-    base_url = ((getattr(config, "AI_BASE_URL", "") or "").strip()) or None
+    base_url = (profile.get("base_url", "") or "").strip() or None
 
     # 延迟导入：避免无 AI 依赖时影响主程序启动
     try:
@@ -147,7 +149,7 @@ def generate_tiktok_copy(desc_cn: str, tone: str, role_prompt: str = "", model: 
 {role_in_user}
 """.strip()
 
-    use_model = ((model or "").strip()) or config.AI_MODEL
+    use_model = (profile.get("model", "") or "").strip() or config.AI_MODEL
     # 优先尝试 JSON 模式（兼容的模型会更稳定输出 JSON）；不兼容则自动降级。
     # 同时：当 base_url 为火山方舟时，可按需透传 thinking 参数以开启/关闭“深度思考”。
     ark_extra = _build_ark_thinking_extra_body() if _is_ark_base_url(base_url) else None

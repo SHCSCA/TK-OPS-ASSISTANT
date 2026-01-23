@@ -17,8 +17,7 @@ APP_VERSION = "2.2.0"
 # Telemetry
 SENTRY_DSN = os.getenv("SENTRY_DSN", "") # 空字符串表示禁用
 
-# Auto Update
-UPDATE_CHECK_URL = os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/your_username/tk-ops-assistant/releases/latest")
+# Auto Update (初始化依赖 _clean_env_value，定义在函数之后)
 
 def _is_frozen() -> bool:
 	return bool(getattr(sys, "frozen", False))
@@ -39,6 +38,11 @@ def _clean_env_value(value: str | None) -> str:
 	if (text.startswith("\"") and text.endswith("\"")) or (text.startswith("'") and text.endswith("'")):
 		text = text[1:-1].strip()
 	return text
+
+
+# Auto Update
+UPDATE_PROVIDER = _clean_env_value(os.getenv("UPDATE_PROVIDER", "github")) or "github"
+UPDATE_CHECK_URL = os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest")
 
 
 def _fallback_data_dir() -> Path:
@@ -138,6 +142,41 @@ if not AI_VISION_MODEL:
 	AI_VISION_MODEL = AI_MODEL
 AI_SYSTEM_PROMPT = _clean_env_value(os.getenv("AI_SYSTEM_PROMPT", ""))
 
+# 多供应商配置（可选）
+AI_DOUBAO_API_KEY = _clean_env_value(os.getenv("AI_DOUBAO_API_KEY", ""))
+AI_DOUBAO_BASE_URL = _clean_env_value(os.getenv("AI_DOUBAO_BASE_URL", ""))
+AI_QWEN_API_KEY = _clean_env_value(os.getenv("AI_QWEN_API_KEY", ""))
+AI_QWEN_BASE_URL = _clean_env_value(os.getenv("AI_QWEN_BASE_URL", ""))
+AI_DEEPSEEK_API_KEY = _clean_env_value(os.getenv("AI_DEEPSEEK_API_KEY", ""))
+AI_DEEPSEEK_BASE_URL = _clean_env_value(os.getenv("AI_DEEPSEEK_BASE_URL", ""))
+
+# 任务级选择供应商（可选）
+AI_COPYWRITER_PROVIDER = _clean_env_value(os.getenv("AI_COPYWRITER_PROVIDER", ""))
+AI_FACTORY_PROVIDER = _clean_env_value(os.getenv("AI_FACTORY_PROVIDER", ""))
+AI_TIMELINE_PROVIDER = _clean_env_value(os.getenv("AI_TIMELINE_PROVIDER", ""))
+AI_PHOTO_PROVIDER = _clean_env_value(os.getenv("AI_PHOTO_PROVIDER", ""))
+AI_VISION_PROVIDER = _clean_env_value(os.getenv("AI_VISION_PROVIDER", ""))
+
+# 任务级覆盖（可选）：用于按功能选择不同模型/服务
+AI_COPYWRITER_API_KEY = _clean_env_value(os.getenv("AI_COPYWRITER_API_KEY", ""))
+AI_COPYWRITER_BASE_URL = _clean_env_value(os.getenv("AI_COPYWRITER_BASE_URL", ""))
+AI_COPYWRITER_MODEL = _clean_env_value(os.getenv("AI_COPYWRITER_MODEL", ""))
+
+AI_FACTORY_API_KEY = _clean_env_value(os.getenv("AI_FACTORY_API_KEY", ""))
+AI_FACTORY_BASE_URL = _clean_env_value(os.getenv("AI_FACTORY_BASE_URL", ""))
+AI_FACTORY_MODEL = _clean_env_value(os.getenv("AI_FACTORY_MODEL", ""))
+
+AI_TIMELINE_API_KEY = _clean_env_value(os.getenv("AI_TIMELINE_API_KEY", ""))
+AI_TIMELINE_BASE_URL = _clean_env_value(os.getenv("AI_TIMELINE_BASE_URL", ""))
+AI_TIMELINE_MODEL = _clean_env_value(os.getenv("AI_TIMELINE_MODEL", ""))
+
+AI_PHOTO_API_KEY = _clean_env_value(os.getenv("AI_PHOTO_API_KEY", ""))
+AI_PHOTO_BASE_URL = _clean_env_value(os.getenv("AI_PHOTO_BASE_URL", ""))
+AI_PHOTO_MODEL = _clean_env_value(os.getenv("AI_PHOTO_MODEL", ""))
+
+AI_VISION_API_KEY = _clean_env_value(os.getenv("AI_VISION_API_KEY", ""))
+AI_VISION_BASE_URL = _clean_env_value(os.getenv("AI_VISION_BASE_URL", ""))
+
 # 火山方舟（Ark）可选参数：深度思考模式。
 # 注意：仅部分模型支持该字段；且文档说明“默认开启深度思考模式，可手动关闭”。
 # 这里保持默认不发送，由用户按需配置：enabled / disabled（以官方文档为准）。
@@ -159,6 +198,28 @@ TTS_PROVIDER = _clean_env_value(os.getenv("TTS_PROVIDER", "edge-tts")) or "edge-
 TTS_FALLBACK_PROVIDER = _clean_env_value(os.getenv("TTS_FALLBACK_PROVIDER", ""))
 TTS_VOICE = _clean_env_value(os.getenv("TTS_VOICE", "en-US-AvaNeural")) or "en-US-AvaNeural"
 TTS_SPEED = _clean_env_value(os.getenv("TTS_SPEED", "1.1")) or "1.1"
+TTS_EMOTION_PRESET = _clean_env_value(os.getenv("TTS_EMOTION_PRESET", ""))
+TTS_EMOTION_CUSTOM = _clean_env_value(os.getenv("TTS_EMOTION_CUSTOM", ""))
+TTS_EMOTION_INTENSITY = _clean_env_value(os.getenv("TTS_EMOTION_INTENSITY", "中")) or "中"
+TTS_SCENE_MODE = _clean_env_value(os.getenv("TTS_SCENE_MODE", ""))
+
+# ===================================================
+# 云端图转视频（I2V）配置
+# ===================================================
+VIDEO_CLOUD_ENABLED = _clean_env_value(os.getenv("VIDEO_CLOUD_ENABLED", "false")).lower() == "true"
+VIDEO_CLOUD_API_KEY = _clean_env_value(os.getenv("VIDEO_CLOUD_API_KEY", ""))
+VIDEO_CLOUD_SUBMIT_URL = _clean_env_value(os.getenv("VIDEO_CLOUD_SUBMIT_URL", ""))
+VIDEO_CLOUD_STATUS_URL = _clean_env_value(os.getenv("VIDEO_CLOUD_STATUS_URL", ""))
+VIDEO_CLOUD_MODEL = _clean_env_value(os.getenv("VIDEO_CLOUD_MODEL", ""))
+VIDEO_CLOUD_QUALITY = _clean_env_value(os.getenv("VIDEO_CLOUD_QUALITY", "low")) or "low"
+try:
+	VIDEO_CLOUD_TIMEOUT = float(_clean_env_value(os.getenv("VIDEO_CLOUD_TIMEOUT", "120")) or 120.0)
+except Exception:
+	VIDEO_CLOUD_TIMEOUT = 120.0
+try:
+	VIDEO_CLOUD_POLL_SEC = float(_clean_env_value(os.getenv("VIDEO_CLOUD_POLL_SEC", "2")) or 2.0)
+except Exception:
+	VIDEO_CLOUD_POLL_SEC = 2.0
 
 # 火山/豆包 TTS（Token 模式）
 VOLC_TTS_ENDPOINT = _clean_env_value(os.getenv("VOLC_TTS_ENDPOINT", "https://openspeech.bytedance.com/api/v1/tts"))
@@ -274,7 +335,7 @@ VIDEO_REMIX_ADD_NOISE = os.getenv("VIDEO_REMIX_ADD_NOISE", "0") == "1"
 VIDEO_REMIX_STRIP_METADATA = os.getenv("VIDEO_REMIX_STRIP_METADATA", "1") == "1"
 
 # ===================================================
-# 图文成片（V2.0）默认参数
+# 图转视频（V2.0）默认参数
 # ===================================================
 PHOTO_VIDEO_FPS = _env_int("PHOTO_VIDEO_FPS", 24)
 PHOTO_PREVIEW_VOLUME = _env_int("PHOTO_PREVIEW_VOLUME", 80)
@@ -385,11 +446,22 @@ def reload_config() -> None:
 	global ECHOTIK_API_KEY, ECHOTIK_API_SECRET
 	global RAPIDAPI_KEY, RAPIDAPI_HOST
 	global AI_PROVIDER, AI_API_KEY, AI_BASE_URL, AI_MODEL
-	global AI_VISION_MODEL
+	global AI_VISION_MODEL, AI_VISION_API_KEY, AI_VISION_BASE_URL
+	global AI_COPYWRITER_API_KEY, AI_COPYWRITER_BASE_URL, AI_COPYWRITER_MODEL
+	global AI_FACTORY_API_KEY, AI_FACTORY_BASE_URL, AI_FACTORY_MODEL
+	global AI_TIMELINE_API_KEY, AI_TIMELINE_BASE_URL, AI_TIMELINE_MODEL
+	global AI_PHOTO_API_KEY, AI_PHOTO_BASE_URL, AI_PHOTO_MODEL
+	global AI_DOUBAO_API_KEY, AI_DOUBAO_BASE_URL
+	global AI_QWEN_API_KEY, AI_QWEN_BASE_URL
+	global AI_DEEPSEEK_API_KEY, AI_DEEPSEEK_BASE_URL
+	global AI_COPYWRITER_PROVIDER, AI_FACTORY_PROVIDER, AI_TIMELINE_PROVIDER, AI_PHOTO_PROVIDER, AI_VISION_PROVIDER
 	global AI_SYSTEM_PROMPT, AI_COPYWRITER_ROLE_PROMPT, AI_FACTORY_ROLE_PROMPT
 	global AI_OUTPUT_LANG
 	global ARK_THINKING_TYPE
 	global TTS_PROVIDER, TTS_FALLBACK_PROVIDER, TTS_VOICE, TTS_SPEED
+	global TTS_EMOTION_PRESET, TTS_EMOTION_CUSTOM, TTS_EMOTION_INTENSITY, TTS_SCENE_MODE
+	global VIDEO_CLOUD_ENABLED, VIDEO_CLOUD_API_KEY, VIDEO_CLOUD_SUBMIT_URL, VIDEO_CLOUD_STATUS_URL, VIDEO_CLOUD_MODEL
+	global VIDEO_CLOUD_QUALITY, VIDEO_CLOUD_TIMEOUT, VIDEO_CLOUD_POLL_SEC
 	global VOLC_TTS_ENDPOINT, VOLC_TTS_APPID, VOLC_TTS_ACCESS_TOKEN, VOLC_TTS_SECRET_KEY, VOLC_TTS_TOKEN, VOLC_TTS_CLUSTER, VOLC_TTS_VOICE_TYPE, VOLC_TTS_ENCODING
 	global IP_CHECK_ENABLED, IP_API_URL, IP_API_TIMEOUT
 	global IP_CHECK_INTERVAL_SEC, IP_SCAMALYTICS_MAX_SCORE
@@ -411,6 +483,7 @@ def reload_config() -> None:
 	global CYBORG_INTRO_SEC, CYBORG_OUTRO_SEC
 	global COMMENT_WATCH_KEYWORDS, COMMENT_BLOCKLIST
 	global COMMENT_DM_ENABLED, COMMENT_DM_TEMPLATE
+	global UPDATE_PROVIDER, UPDATE_CHECK_URL
 
 	ECHOTIK_API_KEY = _clean_env_value(os.getenv("ECHOTIK_API_KEY", ""))
 	ECHOTIK_API_SECRET = _clean_env_value(os.getenv("ECHOTIK_API_SECRET", ""))
@@ -425,6 +498,33 @@ def reload_config() -> None:
 	if not AI_VISION_MODEL:
 		AI_VISION_MODEL = AI_MODEL
 	AI_SYSTEM_PROMPT = _clean_env_value(os.getenv("AI_SYSTEM_PROMPT", ""))
+
+	AI_DOUBAO_API_KEY = _clean_env_value(os.getenv("AI_DOUBAO_API_KEY", ""))
+	AI_DOUBAO_BASE_URL = _clean_env_value(os.getenv("AI_DOUBAO_BASE_URL", ""))
+	AI_QWEN_API_KEY = _clean_env_value(os.getenv("AI_QWEN_API_KEY", ""))
+	AI_QWEN_BASE_URL = _clean_env_value(os.getenv("AI_QWEN_BASE_URL", ""))
+	AI_DEEPSEEK_API_KEY = _clean_env_value(os.getenv("AI_DEEPSEEK_API_KEY", ""))
+	AI_DEEPSEEK_BASE_URL = _clean_env_value(os.getenv("AI_DEEPSEEK_BASE_URL", ""))
+
+	AI_COPYWRITER_PROVIDER = _clean_env_value(os.getenv("AI_COPYWRITER_PROVIDER", ""))
+	AI_FACTORY_PROVIDER = _clean_env_value(os.getenv("AI_FACTORY_PROVIDER", ""))
+	AI_TIMELINE_PROVIDER = _clean_env_value(os.getenv("AI_TIMELINE_PROVIDER", ""))
+	AI_PHOTO_PROVIDER = _clean_env_value(os.getenv("AI_PHOTO_PROVIDER", ""))
+	AI_VISION_PROVIDER = _clean_env_value(os.getenv("AI_VISION_PROVIDER", ""))
+	AI_COPYWRITER_API_KEY = _clean_env_value(os.getenv("AI_COPYWRITER_API_KEY", ""))
+	AI_COPYWRITER_BASE_URL = _clean_env_value(os.getenv("AI_COPYWRITER_BASE_URL", ""))
+	AI_COPYWRITER_MODEL = _clean_env_value(os.getenv("AI_COPYWRITER_MODEL", ""))
+	AI_FACTORY_API_KEY = _clean_env_value(os.getenv("AI_FACTORY_API_KEY", ""))
+	AI_FACTORY_BASE_URL = _clean_env_value(os.getenv("AI_FACTORY_BASE_URL", ""))
+	AI_FACTORY_MODEL = _clean_env_value(os.getenv("AI_FACTORY_MODEL", ""))
+	AI_TIMELINE_API_KEY = _clean_env_value(os.getenv("AI_TIMELINE_API_KEY", ""))
+	AI_TIMELINE_BASE_URL = _clean_env_value(os.getenv("AI_TIMELINE_BASE_URL", ""))
+	AI_TIMELINE_MODEL = _clean_env_value(os.getenv("AI_TIMELINE_MODEL", ""))
+	AI_PHOTO_API_KEY = _clean_env_value(os.getenv("AI_PHOTO_API_KEY", ""))
+	AI_PHOTO_BASE_URL = _clean_env_value(os.getenv("AI_PHOTO_BASE_URL", ""))
+	AI_PHOTO_MODEL = _clean_env_value(os.getenv("AI_PHOTO_MODEL", ""))
+	AI_VISION_API_KEY = _clean_env_value(os.getenv("AI_VISION_API_KEY", ""))
+	AI_VISION_BASE_URL = _clean_env_value(os.getenv("AI_VISION_BASE_URL", ""))
 	AI_OUTPUT_LANG = _clean_env_value(os.getenv("AI_OUTPUT_LANG", "en")) or "en"
 	ARK_THINKING_TYPE = _clean_env_value(os.getenv("ARK_THINKING_TYPE", ""))
 	AI_COPYWRITER_ROLE_PROMPT = _clean_env_value(os.getenv("AI_COPYWRITER_ROLE_PROMPT", ""))
@@ -434,6 +534,19 @@ def reload_config() -> None:
 	TTS_FALLBACK_PROVIDER = _clean_env_value(os.getenv("TTS_FALLBACK_PROVIDER", ""))
 	TTS_VOICE = _clean_env_value(os.getenv("TTS_VOICE", "en-US-AvaNeural")) or "en-US-AvaNeural"
 	TTS_SPEED = _clean_env_value(os.getenv("TTS_SPEED", "1.1")) or "1.1"
+	TTS_EMOTION_PRESET = _clean_env_value(os.getenv("TTS_EMOTION_PRESET", ""))
+	TTS_EMOTION_CUSTOM = _clean_env_value(os.getenv("TTS_EMOTION_CUSTOM", ""))
+	TTS_EMOTION_INTENSITY = _clean_env_value(os.getenv("TTS_EMOTION_INTENSITY", "中")) or "中"
+	TTS_SCENE_MODE = _clean_env_value(os.getenv("TTS_SCENE_MODE", ""))
+
+	VIDEO_CLOUD_ENABLED = _clean_env_value(os.getenv("VIDEO_CLOUD_ENABLED", "false")).lower() == "true"
+	VIDEO_CLOUD_API_KEY = _clean_env_value(os.getenv("VIDEO_CLOUD_API_KEY", ""))
+	VIDEO_CLOUD_SUBMIT_URL = _clean_env_value(os.getenv("VIDEO_CLOUD_SUBMIT_URL", ""))
+	VIDEO_CLOUD_STATUS_URL = _clean_env_value(os.getenv("VIDEO_CLOUD_STATUS_URL", ""))
+	VIDEO_CLOUD_MODEL = _clean_env_value(os.getenv("VIDEO_CLOUD_MODEL", ""))
+	VIDEO_CLOUD_QUALITY = _clean_env_value(os.getenv("VIDEO_CLOUD_QUALITY", "low")) or "low"
+	VIDEO_CLOUD_TIMEOUT = _env_float("VIDEO_CLOUD_TIMEOUT", 120.0)
+	VIDEO_CLOUD_POLL_SEC = _env_float("VIDEO_CLOUD_POLL_SEC", 2.0)
 
 	VOLC_TTS_ENDPOINT = _clean_env_value(os.getenv("VOLC_TTS_ENDPOINT", "https://openspeech.bytedance.com/api/v1/tts"))
 	VOLC_TTS_APPID = _clean_env_value(os.getenv("VOLC_TTS_APPID", ""))
@@ -515,6 +628,9 @@ def reload_config() -> None:
 	COMMENT_DM_ENABLED = (os.getenv("COMMENT_DM_ENABLED", "true").lower() == "true")
 	COMMENT_DM_TEMPLATE = _clean_env_value(os.getenv("COMMENT_DM_TEMPLATE", "Thanks! I sent you the link in DM."))
 
+	UPDATE_PROVIDER = _clean_env_value(os.getenv("UPDATE_PROVIDER", "github")) or "github"
+	UPDATE_CHECK_URL = _clean_env_value(os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest"))
+
 
 def get_config(key: str, default=None):
 	"""从内存配置读取配置项。"""
@@ -576,6 +692,8 @@ def sync_env_file() -> None:
 	defaults: dict[str, str] = {
 		"THEME_MODE": "dark",
 		"LOG_LEVEL": "INFO",
+		"UPDATE_PROVIDER": "github",
+		"UPDATE_CHECK_URL": "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest",
 		"RAPIDAPI_KEY": "",
 		"RAPIDAPI_HOST": "",
 		"AI_PROVIDER": "openai",
@@ -583,8 +701,33 @@ def sync_env_file() -> None:
 		"AI_API_KEY": "",
 		"AI_MODEL": "gpt-4o-mini",
 		"AI_VISION_MODEL": "",
+		"AI_VISION_API_KEY": "",
+		"AI_VISION_BASE_URL": "",
+		"AI_DOUBAO_API_KEY": "",
+		"AI_DOUBAO_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
+		"AI_QWEN_API_KEY": "",
+		"AI_QWEN_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		"AI_DEEPSEEK_API_KEY": "",
+		"AI_DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+		"AI_COPYWRITER_PROVIDER": "",
+		"AI_FACTORY_PROVIDER": "",
+		"AI_TIMELINE_PROVIDER": "",
+		"AI_PHOTO_PROVIDER": "",
+		"AI_VISION_PROVIDER": "",
 		"AI_SYSTEM_PROMPT": "",
 		"ARK_THINKING_TYPE": "",
+		"AI_COPYWRITER_API_KEY": "",
+		"AI_COPYWRITER_BASE_URL": "",
+		"AI_COPYWRITER_MODEL": "",
+		"AI_FACTORY_API_KEY": "",
+		"AI_FACTORY_BASE_URL": "",
+		"AI_FACTORY_MODEL": "",
+		"AI_TIMELINE_API_KEY": "",
+		"AI_TIMELINE_BASE_URL": "",
+		"AI_TIMELINE_MODEL": "",
+		"AI_PHOTO_API_KEY": "",
+		"AI_PHOTO_BASE_URL": "",
+		"AI_PHOTO_MODEL": "",
 		"AI_COPYWRITER_ROLE_PROMPT": "",
 		"AI_FACTORY_ROLE_PROMPT": "",
 		"AI_OUTPUT_LANG": "en",
@@ -592,6 +735,18 @@ def sync_env_file() -> None:
 		"TTS_FALLBACK_PROVIDER": "",
 		"TTS_VOICE": "en-US-AvaNeural",
 		"TTS_SPEED": "1.1",
+		"TTS_EMOTION_PRESET": "",
+		"TTS_EMOTION_CUSTOM": "",
+		"TTS_EMOTION_INTENSITY": "中",
+		"TTS_SCENE_MODE": "",
+		"VIDEO_CLOUD_ENABLED": "false",
+		"VIDEO_CLOUD_API_KEY": "",
+		"VIDEO_CLOUD_SUBMIT_URL": "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+		"VIDEO_CLOUD_STATUS_URL": "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/{task_id}",
+		"VIDEO_CLOUD_MODEL": "",
+		"VIDEO_CLOUD_QUALITY": "low",
+		"VIDEO_CLOUD_TIMEOUT": "120",
+		"VIDEO_CLOUD_POLL_SEC": "2",
 		"VOLC_TTS_ENDPOINT": "https://openspeech.bytedance.com/api/v1/tts",
 		"VOLC_TTS_APPID": "",
 		"VOLC_TTS_ACCESS_TOKEN": "",
@@ -623,7 +778,7 @@ def sync_env_file() -> None:
 		"VIDEO_REMIX_MICRO_ZOOM": "1",
 		"VIDEO_REMIX_ADD_NOISE": "0",
 		"VIDEO_REMIX_STRIP_METADATA": "1",
-		# 图文成片（V2.0）
+		# 图转视频（V2.0）
 		"PHOTO_VIDEO_FPS": "24",
 		"PHOTO_PREVIEW_VOLUME": "80",
 		"TIKTOK_VIDEO_BITRATE": "3500k",

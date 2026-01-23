@@ -273,7 +273,7 @@ QTabBar::tab:hover {
     background-color: #2c2c2c;
 }
 
-/* 图文成片预览区 */
+/* 图转视频预览区 */
 QVideoWidget#PhotoPreview {
     background-color: #2b2b2b;
     border: 1px solid #3a3a3a;
@@ -817,7 +817,7 @@ QTabBar::tab:hover {
     color: #1f2d3d;
 }
 
-/* 图文成片预览区（浅色） */
+/* 图转视频预览区（浅色） */
 QVideoWidget#PhotoPreview {
     background-color: #f6f7fb;
     border: 1px solid #d9deea;

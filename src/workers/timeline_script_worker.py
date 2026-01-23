@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 import config
+from utils.ai_routing import resolve_ai_profile
 from workers.base_worker import BaseWorker
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class TimelineScriptWorker(BaseWorker):
         total_duration: float,
         role_prompt: str = "",
         model: str = "",
+        provider: str = "",
         max_attempts: int = 3,
     ):
         super().__init__()
@@ -53,6 +55,7 @@ class TimelineScriptWorker(BaseWorker):
         self.total_duration = max(3.0, float(total_duration or 15.0))
         self.role_prompt = (role_prompt or "").strip()
         self.model = (model or "").strip()
+        self.provider = (provider or "").strip()
         self.max_attempts = max(1, int(max_attempts or 1))
 
     def _run_impl(self) -> None:
@@ -60,13 +63,35 @@ class TimelineScriptWorker(BaseWorker):
             self.emit_finished(False, "请先填写【商品/视频描述】。")
             return
 
-        api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+        profile = resolve_ai_profile("timeline", model_override=self.model, provider_override=self.provider)
+        api_key = (profile.get("api_key", "") or "").strip()
         if not api_key:
             self.emit_finished(False, "AI_API_KEY 未配置：请先在【系统设置】配置。")
             return
 
-        base_url = ((getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com")
-        use_model = self.model or (getattr(config, "AI_MODEL", "") or "deepseek-chat")
+        base_url = (profile.get("base_url", "") or "").strip() or "https://api.deepseek.com"
+        use_model = (profile.get("model", "") or "").strip() or "deepseek-chat"
+
+        # --- Model Capability Validation ---
+        # 1. Block Video Models for Text Tasks
+        _model_lower = use_model.lower()
+        if any(k in _model_lower for k in ("seedance", "t2v", "i2v", "wan2.1", "wan2-1")):
+            self.emit_log(f"⚠️ 错误：检测到视频生成模型 '{use_model}'")
+            self.emit_log("❌ 时间轴脚本生成是**纯文本任务**，不能使用视频模型！")
+            self.emit_log("👉 请在【系统设置 -> 时间轴模型】中切换为文本模型（如 doubao-pro-32k, deepseek-chat）。")
+            self.emit_finished(False, f"配置错误：'{use_model}' 是视频模型，不支持生成脚本。")
+            return
+
+        # 2. DeepSeek Model Name Validation & Auto-Correction
+        if "deepseek.com" in base_url:
+            if use_model not in ("deepseek-chat", "deepseek-reasoner"):
+                original_model = use_model
+                if "r1" in original_model.lower():
+                    use_model = "deepseek-reasoner"
+                    self.emit_log(f"⚠️ 自动修正：模型 '{original_model}' -> '{use_model}' (DeepSeek R1 官方名称)")
+                else:
+                    use_model = "deepseek-chat"
+                    self.emit_log(f"⚠️ 自动修正：模型 '{original_model}' -> '{use_model}' (DeepSeek V3 官方名称)")
 
         system = (
             "You are a TikTok short-form script writer. "
@@ -81,7 +106,9 @@ class TimelineScriptWorker(BaseWorker):
             "Constraints:\n"
             "- English pacing ~2.5 words/second.\n"
             "- Each segment must have start<end.\n"
-            "- Emotion must be one of: happy, sad, angry, surprise, neutral.\n"
+            "- Emotion must be one of: happy, sad, angry, surprise, neutral, excited, calm, serious, curious, persuasive, suspense, warm, firm, energetic.\n"
+            "- Emotion selection guide: hook=excited/curious, pain=serious, solution=persuasive/warm, CTA=firm/energetic.\n"
+            "- Structure guide: ensure segments roughly follow Hook -> Pain -> Solution -> CTA in order.\n"
             "- Output STRICT JSON object with key timeline only.\n\n"
             "JSON schema:\n"
             "{\n"
@@ -91,6 +118,12 @@ class TimelineScriptWorker(BaseWorker):
             "}\n\n"
             f"Product description:\n{self.product_desc}\n"
         )
+        try:
+            scene_mode = (getattr(config, "TTS_SCENE_MODE", "") or "").strip()
+        except Exception:
+            scene_mode = ""
+        if scene_mode:
+            user += f"\nScene mode: {scene_mode} (tone guidance)\n"
 
         last_reason = ""
         last_raw = ""
@@ -160,7 +193,7 @@ class TimelineScriptWorker(BaseWorker):
                 "model": model,
                 "messages": messages,
                 "temperature": 0.4,
-                "max_tokens": 1200,
+                "max_tokens": 4096,
                 "response_format": {"type": "json_object"},
             }
 
@@ -171,6 +204,13 @@ class TimelineScriptWorker(BaseWorker):
                 if "response_format" in kwargs:
                     del kwargs["response_format"]
                 resp = client.chat.completions.create(**kwargs)
+
+            # 检查截断
+            try:
+                if resp.choices[0].finish_reason == "length":
+                     self.emit_log("⚠️ 警告：输出因达到最大长度限制而被截断 (Max Tokens)")
+            except Exception:
+                pass
 
             # Token 统计
             try:
@@ -185,6 +225,15 @@ class TimelineScriptWorker(BaseWorker):
 
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:
+            # 强化错误感知
+            msg = str(e)
+            if "Error code: 404" in msg:
+                self.emit_log(f"❌ 模型配置错误：找不到模型 {model} (404)。请在设置中修正。")
+                return ""
+            if "Error code: 400" in msg:
+                 self.emit_log(f"❌ 参数错误 (400)：模型 {model} 可能不支持当前参数。")
+                 return ""
+                 
             logger.error(f"时间轴脚本生成调用失败: {e}", exc_info=True)
             self.emit_log(f"❌ 时间轴脚本生成调用失败：{e}")
             return ""

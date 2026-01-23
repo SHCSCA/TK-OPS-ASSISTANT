@@ -119,3 +119,38 @@ class ProfitCalculator:
         except (ValueError, ZeroDivisionError) as e:
             logger.warning(f"利润计算异常: {e}")
             return 0.0, 0.0
+
+
+class AIAnalysisWorker(QThread):
+    """
+    负责调用 DeepSeek 进行选品分析的异步 Worker。
+    避免界面卡死。
+    """
+    finished = pyqtSignal(str, str) # title, analysis_result_text
+    error = pyqtSignal(str, str)    # title, error_message
+
+    def __init__(self, title, price, sales):
+        super().__init__()
+        self.title = title
+        self.price = price
+        self.sales = sales
+
+    def run(self):
+        try:
+            from api.deepseek_client import get_deepseek_client
+            client = get_deepseek_client()
+            
+            if not client.is_configured():
+                self.error.emit(self.title, "未配置 AI API Key")
+                return
+
+            # Simulate network delay if needed, or just call
+            analysis = client.analyze_product_potential(
+                self.title, 
+                self.price, 
+                self.sales
+            )
+            self.finished.emit(self.title, analysis)
+        except Exception as e:
+            logger.error(f"AI Analysis Failed: {e}", exc_info=True)
+            self.error.emit(self.title, str(e))

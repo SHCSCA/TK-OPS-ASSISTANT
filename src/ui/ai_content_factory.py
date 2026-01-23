@@ -52,15 +52,25 @@ from workers.photo_video_worker import PhotoVideoWorker
 from workers.video_worker import CyborgComposeWorker
 from utils.ui_log import append_log, install_log_context_menu
 from ui.toast import Toast
+from utils.ai_models_cache import get_provider_models, list_ok_providers
+
+# 供应商显示名映射（用于下拉框）
+_PROVIDER_LABELS = {
+    "doubao": "豆包/火山",
+    "qwen": "千问/通义",
+    "deepseek": "DeepSeek",
+}
 
 
 class AIContentFactoryPanel(QWidget):
-    """AI 二创工厂（视频自动二创 & 半人马拼接）"""
+    """AI 二创工厂（视频自动二创）"""
 
-    def __init__(self, *, enable_photo: bool = True, photo_only: bool = False):
+    def __init__(self, *, enable_photo: bool = True, photo_only: bool = False, enable_cyborg: bool = True, cyborg_only: bool = False):
         super().__init__()
         self._enable_photo = bool(enable_photo)
         self._photo_only = bool(photo_only)
+        self._enable_cyborg = bool(enable_cyborg)
+        self._cyborg_only = bool(cyborg_only)
         self.worker: AIContentWorker | None = None
         self.script_worker: AIScriptWorker | None = None
         self.photo_worker: PhotoVideoWorker | None = None
@@ -96,17 +106,101 @@ class AIContentFactoryPanel(QWidget):
         self.main_tabs.setObjectName("MainAIContentTabs")
         layout.addWidget(self.main_tabs)
 
-        # ----------- [Tab A] 智能解说二创 (Original Logic) -----------
-        self.tab_smart_narrate = QWidget()
-        self._init_smart_narrate_ui(self.tab_smart_narrate)
-        self.main_tabs.addTab(self.tab_smart_narrate, "🎙️ 智能解说二创")
+        self._main_tab_index = {}
 
-        # ----------- [Tab B] 半人马拼接 (New Logic) -----------
-        self.tab_cyborg = QWidget()
-        self._init_cyborg_ui(self.tab_cyborg)
-        self.main_tabs.addTab(self.tab_cyborg, "🐴 半人马拼接")
+        # ----------- [Tab A] 智能解说二创 -----------
+        if not self._cyborg_only:
+            self.tab_smart_narrate = QWidget()
+            self._init_smart_narrate_ui(self.tab_smart_narrate)
+            self._main_tab_index["narrate"] = self.main_tabs.addTab(self.tab_smart_narrate, "🎙️ 智能解说二创")
+
+        # ----------- [Tab B] 半人马拼接 -----------
+        if self._enable_cyborg:
+            self.tab_cyborg = QWidget()
+            self._init_cyborg_ui(self.tab_cyborg)
+            self._main_tab_index["cyborg"] = self.main_tabs.addTab(self.tab_cyborg, "🐴 半人马拼接")
 
         self.setLayout(layout)
+        try:
+            self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
+        except Exception:
+            pass
+
+    def _on_main_tab_changed(self, _idx: int) -> None:
+        try:
+            # 切换标签时刷新供应商/模型联动（读取最新缓存）
+            self._setup_provider_combo(self.factory_provider_combo, getattr(config, "AI_FACTORY_PROVIDER", ""))
+            self._refresh_factory_models()
+            if hasattr(self, "photo_provider_combo"):
+                self._setup_provider_combo(self.photo_provider_combo, getattr(config, "AI_PHOTO_PROVIDER", ""))
+                self._refresh_photo_models()
+        except Exception:
+            pass
+
+    def _setup_provider_combo(self, combo: QComboBox, current_provider: str = "") -> None:
+        """按连通状态填充供应商下拉框。"""
+        ok_providers = set(list_ok_providers())
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("默认（系统设置）", "")
+            for key in ("doubao", "qwen", "deepseek"):
+                if key in ok_providers:
+                    combo.addItem(_PROVIDER_LABELS.get(key, key), key)
+            # 选中当前配置
+            idx = combo.findData((current_provider or "").strip())
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _fill_model_combo(self, combo: QComboBox, models: list[str], fallback_model: str = "") -> None:
+        """填充模型下拉框，支持回退默认模型。"""
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            clean_models = [m for m in (models or []) if m]
+            if clean_models:
+                combo.addItems(clean_models)
+            else:
+                if fallback_model:
+                    combo.addItem(fallback_model)
+                else:
+                    combo.addItem("（未获取模型）")
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _refresh_factory_models(self) -> None:
+        provider = ""
+        try:
+            provider = self.factory_provider_combo.currentData() or ""
+        except Exception:
+            provider = ""
+        models = get_provider_models(provider) if provider else []
+        fallback = (
+            (getattr(config, "AI_FACTORY_MODEL", "") or "").strip()
+            or (getattr(config, "AI_MODEL", "") or "").strip()
+        )
+        self._fill_model_combo(self.factory_model_combo, models, fallback)
+
+    def _refresh_photo_models(self) -> None:
+        provider = ""
+        try:
+            provider = self.photo_provider_combo.currentData() or ""
+        except Exception:
+            provider = ""
+        models = get_provider_models(provider) if provider else []
+        fallback = (
+            (getattr(config, "AI_PHOTO_MODEL", "") or "").strip()
+            or (getattr(config, "AI_MODEL", "") or "").strip()
+        )
+        self._fill_model_combo(self.photo_model_combo, models, fallback)
 
     def _init_smart_narrate_ui(self, parent):
         layout = QVBoxLayout(parent)
@@ -185,14 +279,25 @@ class AIContentFactoryPanel(QWidget):
         ])
         opts_row.addWidget(self.role_combo)
 
-        opts_row.addWidget(QLabel("使用模型："))
-        use_model = (
-            (getattr(config, "AI_MODEL", "") or "").strip()
-            or "（未配置）"
-        )
-        self.model_label = QLabel(use_model)
-        self.model_label.setProperty("variant", "muted")
-        opts_row.addWidget(self.model_label)
+        opts_row.addWidget(QLabel("二创供应商："))
+        self.factory_provider_combo = QComboBox()
+        self.factory_provider_combo.addItem("默认（系统设置）", "")
+        self.factory_provider_combo.addItem("豆包/火山", "doubao")
+        self.factory_provider_combo.addItem("千问/通义", "qwen")
+        self.factory_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_factory_provider = (getattr(config, "AI_FACTORY_PROVIDER", "") or "").strip()
+        self._setup_provider_combo(self.factory_provider_combo, cur_factory_provider)
+        opts_row.addWidget(self.factory_provider_combo)
+
+        opts_row.addWidget(QLabel("二创模型："))
+        self.factory_model_combo = QComboBox()
+        opts_row.addWidget(self.factory_model_combo)
+
+        try:
+            self.factory_provider_combo.currentIndexChanged.connect(self._refresh_factory_models)
+        except Exception:
+            pass
+        self._refresh_factory_models()
 
         self.skip_tts_checkbox = QCheckBox("配音失败自动降级（仍输出脚本+复制原视频）")
         self.skip_tts_checkbox.setChecked(True)
@@ -501,7 +606,7 @@ class AIContentFactoryPanel(QWidget):
         compose_layout.addWidget(step2_frame)
         compose_layout.addStretch(1)
 
-        # ===================== Tab 4: 图文成片 =====================
+        # ===================== Tab 4: 图转视频 =====================
         photo_tab = QWidget()
         photo_layout = QVBoxLayout(photo_tab)
         photo_layout.setContentsMargins(0, 0, 0, 0)
@@ -511,11 +616,11 @@ class AIContentFactoryPanel(QWidget):
         photo_frame.setProperty("class", "config-frame")
         photo_form = QVBoxLayout(photo_frame)
 
-        photo_title = QLabel("图文成片引擎")
+        photo_title = QLabel("图转视频引擎")
         photo_title.setObjectName("h2")
         photo_form.addWidget(photo_title)
 
-        photo_tip = QLabel("用途：仅用图片 + 文案，自动生成带口播的短视频。")
+        photo_tip = QLabel("用途：仅用图片 + 文案，自动生成带口播的短视频（图转视频）。")
         photo_tip.setProperty("variant", "muted")
         photo_form.addWidget(photo_tip)
 
@@ -572,7 +677,7 @@ class AIContentFactoryPanel(QWidget):
 
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("输出目录："))
-        default_photo_out = str((getattr(config, "OUTPUT_DIR", Path("Output")) / "AI_Videos" / "Photo_Videos").resolve())
+        default_photo_out = str((getattr(config, "OUTPUT_DIR", Path("Output")) / "AI_Videos" / "Image_Videos").resolve())
         self.photo_output_input = QLineEdit(default_photo_out)
         out_row.addWidget(self.photo_output_input, 1)
         out_pick = QPushButton("选择目录")
@@ -599,6 +704,28 @@ class AIContentFactoryPanel(QWidget):
         dur_row.addWidget(self.photo_duration_spin)
         dur_row.addStretch(1)
         photo_form.addLayout(dur_row)
+
+        photo_ai_row = QHBoxLayout()
+        photo_ai_row.addWidget(QLabel("图转视频供应商："))
+        self.photo_provider_combo = QComboBox()
+        self.photo_provider_combo.addItem("默认（系统设置）", "")
+        self.photo_provider_combo.addItem("豆包/火山", "doubao")
+        self.photo_provider_combo.addItem("千问/通义", "qwen")
+        self.photo_provider_combo.addItem("DeepSeek", "deepseek")
+        cur_photo_provider = (getattr(config, "AI_PHOTO_PROVIDER", "") or "").strip()
+        self._setup_provider_combo(self.photo_provider_combo, cur_photo_provider)
+        photo_ai_row.addWidget(self.photo_provider_combo)
+
+        photo_ai_row.addWidget(QLabel("图转视频模型："))
+        self.photo_model_combo = QComboBox()
+        photo_ai_row.addWidget(self.photo_model_combo)
+        try:
+            self.photo_provider_combo.currentIndexChanged.connect(self._refresh_photo_models)
+        except Exception:
+            pass
+        self._refresh_photo_models()
+        photo_ai_row.addStretch(1)
+        photo_form.addLayout(photo_ai_row)
 
 
         # 预览播放相关控件
@@ -639,7 +766,7 @@ class AIContentFactoryPanel(QWidget):
         photo_form.addWidget(self.photo_video_widget)
 
         photo_btn_row = QHBoxLayout()
-        self.photo_start_btn = QPushButton("生成图文视频")
+        self.photo_start_btn = QPushButton("生成图转视频")
         self.photo_start_btn.setProperty("variant", "primary")
         self.photo_start_btn.clicked.connect(self._start_photo_video)
         photo_btn_row.addWidget(self.photo_start_btn)
@@ -694,7 +821,7 @@ class AIContentFactoryPanel(QWidget):
             self._tab_index["script"] = self.tabs.addTab(script_tab, "② 脚本生成")
             self._tab_index["compose"] = self.tabs.addTab(compose_tab, "③ 合成输出")
         if self._enable_photo:
-            self._tab_index["photo"] = self.tabs.addTab(photo_tab, "④ 图文成片")
+            self._tab_index["photo"] = self.tabs.addTab(photo_tab, "④ 图转视频")
         self._tab_index["log"] = self.tabs.addTab(log_tab, "运行日志")
 
         # layout.addWidget(self.tabs, 1) -> Moved to top
@@ -835,7 +962,7 @@ class AIContentFactoryPanel(QWidget):
         self.cyborg_start_btn.setEnabled(True)
         self.cyborg_worker = None
         append_log(self.cyborg_log, f"✅ 拼接成功！输出文件:\n{out_path}")
-        Toast.show_success(self, "半人马拼接完成", duration=3000)
+        Toast.show_success(self, "半人马拼接完成")
         
         # Try to open folder
         try:
@@ -865,7 +992,7 @@ class AIContentFactoryPanel(QWidget):
             pass
 
     def _on_photo_preview(self) -> None:
-        """图文成片预览播放：合成临时视频并播放"""
+        """图转视频预览播放：合成临时视频并播放"""
         try:
             if not self.photo_worker:
                 self.photo_worker = PhotoVideoWorker()
@@ -896,15 +1023,15 @@ class AIContentFactoryPanel(QWidget):
                 output_path=tmp_out,
                 callback=lambda path: self._play_photo_preview(path),
             )
-            self._append("[图文成片] 正在生成预览视频...", level="INFO")
+            self._append("[图转视频] 正在生成预览视频...", level="INFO")
         except Exception as e:
-            self._append(f"[图文成片] 预览失败：{e}", level="ERROR")
+            self._append(f"[图转视频] 预览失败：{e}", level="ERROR")
 
     def _play_photo_preview(self, path: str | None) -> None:
         """播放预览视频"""
         try:
             if not path or not os.path.exists(path):
-                self._append("[图文成片] 预览文件不存在", level="ERROR")
+                self._append("[图转视频] 预览文件不存在", level="ERROR")
                 return
             self.photo_media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
             try:
@@ -912,9 +1039,9 @@ class AIContentFactoryPanel(QWidget):
             except Exception:
                 pass
             self.photo_media_player.play()
-            self._append("[图文成片] 预览播放中...", level="INFO")
+            self._append("[图转视频] 预览播放中...", level="INFO")
         except Exception as e:
-            self._append(f"[图文成片] 播放失败：{e}", level="ERROR")
+            self._append(f"[图转视频] 播放失败：{e}", level="ERROR")
 
     def _on_preview_position_changed(self, pos: int) -> None:
         try:
@@ -1281,6 +1408,17 @@ class AIContentFactoryPanel(QWidget):
             persona_key = ""
         skip_tts = bool(self.skip_tts_checkbox.isChecked())
 
+        provider = ""
+        model = ""
+        try:
+            provider = self.factory_provider_combo.currentData() or ""
+        except Exception:
+            provider = ""
+        try:
+            model = (self.factory_model_combo.currentText() or "").strip()
+        except Exception:
+            model = ""
+
         # Worker 内部会自己创建输出目录，这里仍传入绝对路径确保一致
         self.worker = AIContentWorker(
             product_desc=desc,
@@ -1288,6 +1426,8 @@ class AIContentFactoryPanel(QWidget):
             output_dir=out_dir,
             skip_tts_failure=skip_tts,
             role_prompt=role_prompt,
+            model=model,
+            provider=provider,
             script_text=self._approved_script_text,
             script_json=self._approved_script_json,
         )
@@ -1325,6 +1465,12 @@ class AIContentFactoryPanel(QWidget):
 
         role_prompt = self._role_prompt_from_ui()
 
+        persona_key = ""
+        try:
+            persona_key = str(self.persona_combo.currentData() or "").strip()
+        except Exception:
+            persona_key = ""
+
         is_timeline = False
         try:
             is_timeline = self.script_mode_combo.currentIndex() == 1
@@ -1335,12 +1481,24 @@ class AIContentFactoryPanel(QWidget):
 
         self.gen_script_btn.setEnabled(False)
 
+        provider = ""
+        model = ""
+        try:
+            provider = self.factory_provider_combo.currentData() or ""
+        except Exception:
+            provider = ""
+        try:
+            model = (self.factory_model_combo.currentText() or "").strip()
+        except Exception:
+            model = ""
+
         if is_timeline:
             self.script_worker = TimelineScriptWorker(
                 product_desc=desc,
                 total_duration=float(self.timeline_duration_spin.value()),
                 role_prompt=role_prompt,
-                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                model=model,
+                provider=provider,
                 max_attempts=3,
             )
         else:
@@ -1348,7 +1506,8 @@ class AIContentFactoryPanel(QWidget):
                 product_desc=desc,
                 role_prompt=role_prompt,
                 persona_key=persona_key,
-                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                model=model,
+                provider=provider,
                 max_attempts=3,
                 strict_validation=True,
             )
@@ -1606,7 +1765,7 @@ class AIContentFactoryPanel(QWidget):
     def _start_photo_video(self) -> None:
         try:
             if self.photo_worker:
-                QMessageBox.information(self, "提示", "图文成片进行中，请稍候。")
+                QMessageBox.information(self, "提示", "图转视频进行中，请稍候。")
                 return
             if self.worker or self.script_worker:
                 QMessageBox.information(self, "提示", "其他任务进行中，请稍候完成后再试。")
@@ -1636,7 +1795,7 @@ class AIContentFactoryPanel(QWidget):
 
             self.log_view.clear()
             self._reset_token_usage()
-            self._append("开始执行 图文成片...")
+            self._append("开始执行 图转视频...")
 
             self._switch_to_tab("log")
 
@@ -1645,13 +1804,25 @@ class AIContentFactoryPanel(QWidget):
 
             self.photo_start_btn.setEnabled(False)
 
+            provider = ""
+            model = ""
+            try:
+                provider = self.photo_provider_combo.currentData() or ""
+            except Exception:
+                provider = ""
+            try:
+                model = (self.photo_model_combo.currentText() or "").strip()
+            except Exception:
+                model = ""
+
             self.photo_worker = PhotoVideoWorker(
                 images=self._photo_images,
                 product_desc=desc,
                 output_dir=out_dir,
                 image_durations=self._photo_image_durations,
                 role_prompt=role_prompt,
-                model=(getattr(config, "AI_MODEL", "") or "").strip(),
+                model=model,
+                provider=provider,
                 bgm_path=bgm_path,
                 total_duration=float(self.photo_duration_spin.value()),
             )
@@ -1660,7 +1831,7 @@ class AIContentFactoryPanel(QWidget):
             self.photo_worker.start()
         except Exception as e:
             try:
-                self._append(f"图文成片启动异常：{e}", level="ERROR")
+                self._append(f"图转视频启动异常：{e}", level="ERROR")
             except Exception:
                 pass
             try:
@@ -1672,9 +1843,9 @@ class AIContentFactoryPanel(QWidget):
     def _on_photo_done(self, ok: bool, message: str) -> None:
         self.photo_start_btn.setEnabled(True)
         if ok:
-            self._append(message or "图文成片完成")
+            self._append(message or "图转视频完成")
         else:
-            self._append(message or "图文成片失败", level="ERROR")
+            self._append(message or "图转视频失败", level="ERROR")
         self.photo_worker = None
 
     def shutdown(self) -> None:
@@ -1694,7 +1865,7 @@ class AIContentFactoryPanel(QWidget):
 
 
 class PhotoVideoPanel(QWidget):
-    """图文成片独立模块（左侧菜单入口）"""
+    """图转视频独立模块（左侧菜单入口）"""
 
     def __init__(self):
         super().__init__()
@@ -1702,7 +1873,7 @@ class PhotoVideoPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.inner = AIContentFactoryPanel(enable_photo=True, photo_only=True)
+        self.inner = AIContentFactoryPanel(enable_photo=True, photo_only=True, enable_cyborg=False)
         layout.addWidget(self.inner)
 
         try:
@@ -1710,6 +1881,35 @@ class PhotoVideoPanel(QWidget):
                 idx = self.inner._tab_index.get("photo")
                 if idx is not None:
                     self.inner.tabs.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+        self.setLayout(layout)
+
+    def shutdown(self) -> None:
+        try:
+            self.inner.shutdown()
+        except Exception:
+            pass
+
+
+class CyborgPanel(QWidget):
+    """半人马拼接独立模块（左侧菜单入口）"""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.inner = AIContentFactoryPanel(enable_photo=False, cyborg_only=True, enable_cyborg=True)
+        layout.addWidget(self.inner)
+
+        try:
+            if hasattr(self.inner, "_main_tab_index"):
+                idx = self.inner._main_tab_index.get("cyborg")
+                if idx is not None:
+                    self.inner.main_tabs.setCurrentIndex(idx)
         except Exception:
             pass
 

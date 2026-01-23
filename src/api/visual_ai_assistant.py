@@ -12,16 +12,27 @@ from __future__ import annotations
 
 from typing import Iterable
 
-import config
+from utils.ai_routing import resolve_ai_profile
 
 
 class VisualAIAssistant:
     """多模态视觉分析助手（OpenAI 兼容协议）。"""
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None):
-        self.api_key = (api_key or getattr(config, "AI_API_KEY", "") or "").strip()
-        self.base_url = (base_url or getattr(config, "AI_BASE_URL", "") or "").strip()
-        self.model = (model or getattr(config, "AI_VISION_MODEL", "") or "").strip()
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+    ):
+        profile = resolve_ai_profile(
+            "vision",
+            model_override=(model or "").strip(),
+            provider_override=(provider or "").strip(),
+        )
+        self.api_key = (api_key or profile.get("api_key", "") or "").strip()
+        self.base_url = (base_url or profile.get("base_url", "") or "").strip()
+        self.model = (model or profile.get("model", "") or "").strip()
 
     def analyze_frames(self, frames_b64: Iterable[str], prompt: str) -> str:
         """分析连续视频帧并返回模型输出文本。"""
@@ -31,6 +42,9 @@ class VisualAIAssistant:
             raise ValueError("AI_BASE_URL 未配置")
         if not self.model:
             raise ValueError("AI_VISION_MODEL 未配置")
+
+        if "deepseek.com" in self.base_url:
+             raise ValueError("DeepSeek 官方 API 暂不支持视觉分析（图片输入）。请切换到 Aliyun (Qwen-VL) 或 Volcengine (Doubao-Vision)。")
 
         images = [f"data:image/jpeg;base64,{b64}" for b64 in frames_b64 if b64]
         if not images:
@@ -48,11 +62,30 @@ class VisualAIAssistant:
         for url in images:
             content.append({"type": "image_url", "image_url": {"url": url}})
 
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": content}],
-            temperature=0.4,
-            max_tokens=1200,
-        )
-
-        return (resp.choices[0].message.content or "").strip()
+        try:
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=0.4,
+                max_tokens=4096,
+            )
+            
+            try:
+                if resp.choices[0].finish_reason == "length":
+                     logger.warning("VisualAI: Response truncated due to max_tokens limit.")
+            except:
+                pass
+                
+            return (resp.choices[0].message.content or "").strip()
+            
+        except openai.BadRequestError as e:
+            # Handle non-vision model errors specifically
+            msg = str(e).lower()
+            if "image_url" in msg or "expected text" in msg or "invalid_request_error" in msg:
+                raise ValueError(
+                    f"当前模型 ({self.model}) 不支持视觉分析（不支持 image_url 参数）。"
+                    "请在设置中切换为支持 Vision 的模型（如 GPT-4o, Claude-3.5-Sonnet, Gemini-1.5-Pro 等）。"
+                ) from e
+            raise
+        except openai.NotFoundError as e:
+            raise ValueError(f"模型 ({self.model}) 不存在或 API 地址错误 (404)。请检查 AI 设置。") from e

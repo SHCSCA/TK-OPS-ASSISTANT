@@ -23,11 +23,20 @@ logger = logging.getLogger(__name__)
 class VisualAnalysisWorker(BaseWorker):
     """视频拆解与脚本反推 Worker。"""
 
-    def __init__(self, video_path: str, interval_sec: float = 2.0, prompt: str = "") -> None:
+    def __init__(
+        self,
+        video_path: str,
+        interval_sec: float = 2.0,
+        prompt: str = "",
+        model: str = "",
+        provider: str = "",
+    ) -> None:
         super().__init__()
         self.video_path = (video_path or "").strip()
         self.interval_sec = max(0.5, float(interval_sec or 2.0))
         self.prompt = (prompt or "").strip()
+        self.model = (model or "").strip()
+        self.provider = (provider or "").strip()
 
     def _run_impl(self) -> None:
         if not self.video_path:
@@ -47,7 +56,7 @@ class VisualAnalysisWorker(BaseWorker):
                 return
 
             self.emit_log(f"🧠 已抽帧 {len(frames)} 张，开始视觉分析...")
-            assistant = VisualAIAssistant()
+            assistant = VisualAIAssistant(model=self.model, provider=self.provider)
             result_text = assistant.analyze_frames(frames, self.prompt)
             if not result_text:
                 self.emit_finished(False, "视觉模型未返回有效内容")

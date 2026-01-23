@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 import config
+from utils.ai_routing import resolve_ai_profile
 from workers.base_worker import BaseWorker
 from utils.script_validation import validate_tiktok_script_payload
 
@@ -28,8 +29,8 @@ def _is_ark_base_url(base_url: str) -> bool:
     return ("volces.com" in u) or ("volcengine.com" in u) or ("ark." in u)
 
 
-def _build_ark_thinking_extra_body() -> dict[str, Any] | None:
-    base_url_now = (getattr(config, "AI_BASE_URL", "") or "").strip()
+def _build_ark_thinking_extra_body(base_url_now: str = "") -> dict[str, Any] | None:
+    base_url_now = (base_url_now or "").strip()
     thinking_type = (getattr(config, "ARK_THINKING_TYPE", "") or "").strip()
     if not base_url_now or not thinking_type:
         return None
@@ -47,6 +48,7 @@ class AIScriptWorker(BaseWorker):
         role_prompt: str = "",
         persona_key: str = "",
         model: str = "",
+        provider: str = "",
         max_attempts: int = 3,
         strict_validation: bool = True,
     ):
@@ -55,6 +57,7 @@ class AIScriptWorker(BaseWorker):
         self.role_prompt = (role_prompt or "").strip()
         self.persona_key = (persona_key or "").strip().lower()
         self.model = (model or "").strip()
+        self.provider = (provider or "").strip()
         self.max_attempts = max(1, int(max_attempts or 1))
         self.strict_validation = bool(strict_validation)
 
@@ -63,13 +66,14 @@ class AIScriptWorker(BaseWorker):
             self.emit_finished(False, "请先填写【商品/视频描述】。")
             return
 
-        api_key = (getattr(config, "AI_API_KEY", "") or "").strip()
+        profile = resolve_ai_profile("factory", model_override=self.model, provider_override=self.provider)
+        api_key = (profile.get("api_key", "") or "").strip()
         if not api_key:
             self.emit_finished(False, "AI_API_KEY 未配置：请先在【系统设置】配置。")
             return
 
-        base_url = ((getattr(config, "AI_BASE_URL", "") or "").strip() or "https://api.deepseek.com")
-        use_model = self.model or (getattr(config, "AI_MODEL", "") or "deepseek-chat")
+        base_url = (profile.get("base_url", "") or "").strip() or "https://api.deepseek.com"
+        use_model = (profile.get("model", "") or "").strip() or "deepseek-chat"
 
         persona_prompt = ""
         try:
@@ -94,7 +98,7 @@ class AIScriptWorker(BaseWorker):
         except Exception:
             pass
 
-        ark_extra = _build_ark_thinking_extra_body()
+        ark_extra = _build_ark_thinking_extra_body(base_url)
 
         last_reason = ""
         last_raw = ""
@@ -196,7 +200,7 @@ class AIScriptWorker(BaseWorker):
                 "model": model,
                 "messages": messages,
                 "temperature": 0.5, # 稍微提高一点创造力
-                "max_tokens": 1000, # 增加长度以防截断
+                "max_tokens": 4096, # 增加长度以防截断
             }
             if force_json:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -214,6 +218,13 @@ class AIScriptWorker(BaseWorker):
                 if "extra_body" in kwargs:
                     del kwargs["extra_body"]
                 resp = client.chat.completions.create(**kwargs)
+
+            # 检查截断
+            try:
+                if resp.choices[0].finish_reason == "length":
+                     self.emit_log("⚠️ 警告：输出因达到最大长度限制而被截断 (Max Tokens)")
+            except Exception:
+                pass
             
             # === 增强日志：记录 Token 消耗 ===
             try:

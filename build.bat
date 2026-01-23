@@ -52,6 +52,14 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
+REM 校验 EXE 是否生成（确保稳定产出）
+if not exist "dist\tk-ops-assistant.exe" (
+    echo.
+    echo [错误] 未检测到 EXE 产物：dist\tk-ops-assistant.exe
+    echo 请检查 PyInstaller 输出日志。
+    exit /b 2
+)
+
 REM Ensure .env is placed next to exe (frozen mode reads BASE_DIR=.exe folder)
 if not exist "dist" mkdir "dist" >nul 2>&1
 if exist ".env" (

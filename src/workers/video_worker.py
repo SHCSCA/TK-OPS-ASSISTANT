@@ -6,6 +6,8 @@ from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
+from PyQt5.QtCore import pyqtSignal
+
 import config
 from workers.base_worker import BaseWorker
 from utils.excel_export import export_video_processing_log
@@ -13,13 +15,15 @@ from utils.excel_export import export_video_processing_log
 
 class VideoWorker(BaseWorker):
     """Worker for batch video processing"""
+
+    item_finished_signal = pyqtSignal(str, bool, str)  # Path, Success, Message
     
     def __init__(
         self, 
         video_files: List[str] = None, 
         trim_head: float = 0.5,
         trim_tail: float = 0.5,
-        speed: float = 1.1,
+        speed: float | None = None,
         apply_flip: bool = True,
         deep_remix_enabled: bool = False,
         micro_zoom: bool = True,
@@ -46,7 +50,7 @@ class VideoWorker(BaseWorker):
         self.video_files = video_files or []
         self.trim_head = trim_head
         self.trim_tail = trim_tail
-        self.speed = speed
+        self.speed = None if speed is None else speed
         self.apply_flip = apply_flip
 
         self.deep_remix_enabled = deep_remix_enabled
@@ -76,7 +80,7 @@ class VideoWorker(BaseWorker):
 
         # Log parameters
         self.emit_log(
-            f"参数设置：速度={self.speed}x，去头={self.trim_head}s，去尾={self.trim_tail}s，翻转={'是' if self.apply_flip else '否'}"
+            f"参数设置：变速=无级随机(1.10-1.35/秒)，去头={self.trim_head}s，去尾={self.trim_tail}s，翻转={'是' if self.apply_flip else '否'}"
         )
         self.emit_log(
             f"深度去重：{'开' if self.deep_remix_enabled else '关'}"
@@ -94,6 +98,76 @@ class VideoWorker(BaseWorker):
 
         success_count = 0
         fail_count = 0
+
+        # 执行处理（支持并行）
+        completed = 0
+        self.processing_results = []
+
+        if self.parallel_jobs <= 1:
+            for idx, video_path in enumerate(self.video_files, 1):
+                if self.should_stop():
+                    self.emit_finished(False, "任务已停止")
+                    return
+                self.emit_log(f"▶ [{idx}/{total_videos}] 处理：{Path(video_path).name}")
+                _, (ok, msg) = self._process_one_with_retry(video_path)
+                if ok:
+                    success_count += 1
+                    self.emit_log(f"✅ 完成 [{idx}/{total_videos}]：{msg}")
+                    self.item_finished_signal.emit(video_path, True, msg)
+                else:
+                    fail_count += 1
+                    self.emit_log(f"❌ 失败 [{idx}/{total_videos}]：{msg[:100]}")
+                    self.item_finished_signal.emit(video_path, False, msg)
+                self.processing_results.append({
+                    "input": video_path,
+                    "ok": ok,
+                    "message": msg,
+                })
+                completed += 1
+                percent = int(completed / total_videos * 100)
+                self.emit_progress(percent)
+                self.emit_log(f"进度：{percent}%")
+        else:
+            with ThreadPoolExecutor(max_workers=self.parallel_jobs) as executor:
+                future_map = {executor.submit(self._process_one_with_retry, p): p for p in self.video_files}
+                for future in as_completed(future_map):
+                    if self.should_stop():
+                        try:
+                            for f in future_map:
+                                f.cancel()
+                        except Exception:
+                            pass
+                        self.emit_finished(False, "任务已停止")
+                        return
+                    try:
+                        _path, (ok, msg) = future.result()
+                    except Exception as e:
+                        ok, msg = False, str(e)
+                        _path = future_map.get(future, "")
+
+                    name = Path(_path).name if _path else "(unknown)"
+                    if ok:
+                        success_count += 1
+                        self.emit_log(f"✅ 完成：{msg}")
+                        self.item_finished_signal.emit(_path, True, msg)
+                    else:
+                        fail_count += 1
+                        self.emit_log(f"❌ 失败：{msg[:100]}")
+                        self.item_finished_signal.emit(_path, False, msg)
+
+                    self.processing_results.append({
+                        "input": _path,
+                        "ok": ok,
+                        "message": msg,
+                    })
+                    completed += 1
+                    percent = int(completed / total_videos * 100)
+                    self.emit_progress(percent)
+                    self.emit_log(f"进度：{percent}%")
+
+        self.emit_log(f"处理完成：成功 {success_count} / 失败 {fail_count}")
+        self.emit_progress(100)
+        self.emit_finished(True, "处理完成")
 
 
     def _guess_output_filename(self, input_path: str) -> str:
@@ -143,12 +217,14 @@ class CyborgComposeWorker(BaseWorker):
         mid_path: str,
         outro_path: str,
         output_dir: str | None = None,
+        do_deep_remix: bool = False,
     ) -> None:
         super().__init__()
         self.intro_path = (intro_path or "").strip()
         self.mid_path = (mid_path or "").strip()
         self.outro_path = (outro_path or "").strip()
         self.output_dir = output_dir
+        self.do_deep_remix = bool(do_deep_remix)
 
     def _run_impl(self) -> None:
         """执行半人马拼接并回传结果。"""
@@ -170,118 +246,32 @@ class CyborgComposeWorker(BaseWorker):
                 custom_output_dir=self.output_dir,
             )
 
-            self.emit_progress(90)
-            if ok:
-                self.emit_log(f"✅ 半人马拼接完成：{msg}")
-                try:
-                    self.data_signal.emit({"output": msg})
-                except Exception:
-                    pass
-                self.emit_progress(100)
-                self.emit_finished(True, "半人马拼接完成")
-            else:
-                self.emit_log(f"❌ 半人马拼接失败：{msg}")
+            if not ok:
                 self.emit_finished(False, msg)
+                return
+
+            final_path = msg
+            self.emit_progress(80)
+
+            # Deep Remix Logic
+            if self.do_deep_remix:
+                try:
+                    self.emit_log("🔨 正在进行深度混剪 (Remix)...")
+                    ok_remix, res_remix = processor.process_video_ffmpeg_remix(
+                        input_path=final_path, 
+                        custom_output_dir=self.output_dir
+                    )
+                    if ok_remix:
+                        final_path = res_remix
+                        self.emit_log("✅ 深度混剪完成")
+                    else:
+                        self.emit_log(f"⚠️ 深度混剪失败 ({res_remix})，保留拼接原片")
+                except Exception as e:
+                    self.emit_log(f"⚠️ 深度混剪异常：{e}，保留拼接原片")
+
+            self.emit_progress(100)
+            self.emit_finished(True, final_path)
+
         except Exception as e:
             self.emit_log(f"❌ 半人马拼接异常：{e}")
             self.emit_finished(False, f"半人马拼接异常：{e}")
-        else:
-            self.emit_log(f"并行模式：{self.parallel_jobs} 线程处理")
-            completed = 0
-            with ThreadPoolExecutor(max_workers=self.parallel_jobs) as pool:
-                futures = {pool.submit(self._process_one_with_retry, p): p for p in self.video_files}
-
-                for fut in as_completed(futures):
-                    completed += 1
-
-                    if self.should_stop():
-                        # 无法强制中断正在运行的 ffmpeg/moviepy，停止继续等待即可
-                        self.emit_log("已请求停止：等待中的任务将不再汇报（正在处理的视频可能仍会完成输出）。")
-                        break
-
-                    input_path = ""
-                    start_ts = time.perf_counter()
-                    try:
-                        path, (success, message) = fut.result()
-                    except Exception as e:
-                        path = ""
-                        success, message = False, f"✗ 处理失败：{e}"
-                    elapsed = time.perf_counter() - start_ts
-
-                    # 并行模式下尽量记录耗时（粗略：以 future 完成为准）
-                    try:
-                        input_path = futures.get(fut, "")
-                    except Exception:
-                        input_path = ""
-
-                    self.emit_log(message)
-                    if success:
-                        success_count += 1
-                    else:
-                        fail_count += 1
-
-                    input_file = input_path or path
-                    input_name = Path(input_file).name if input_file else ""
-                    self.processing_results.append(
-                        {
-                            "status": "成功" if success else "失败",
-                            "input": input_name,
-                            "output": self._guess_output_filename(input_file) if input_file else "",
-                            "elapsed": float(f"{elapsed:.2f}") if elapsed else 0.0,
-                            "error": "" if success else message,
-                            # 兼容导出字段
-                            "input_filename": input_name,
-                            "output_filename": self._guess_output_filename(input_file) if input_file else "",
-                            "original_duration": 0,
-                            "processed_duration": 0,
-                            "process_time": f"{elapsed:.2f}" if elapsed else "",
-                            "notes": message,
-                            # 兼容旧字段
-                            "success": success,
-                            "message": message,
-                        }
-                    )
-
-                    progress = int((completed / total_videos) * 100)
-                    self.emit_progress(progress)
-            
-        # Summary
-        self.emit_log("\n✓ 处理完成！")
-        self.emit_log(f"  成功：{success_count}")
-        self.emit_log(f"  失败：{fail_count}")
-
-        # Export results
-        try:
-            export_file = export_video_processing_log(self.processing_results, emit_log=self.emit_log)
-            self.emit_log(f"已导出结果到：{export_file}")
-        except Exception as e:
-            self.emit_log(f"导出结果失败：{str(e)}")
-
-        try:
-            self.data_signal.emit(self.processing_results)
-        except Exception:
-            pass
-
-        self.emit_progress(100)
-        self.emit_finished(True, "视频处理完成")
-    
-    def add_video_file(self, video_path: str) -> bool:
-        """
-        Add a video file to processing queue
-        
-        Args:
-            video_path: Path to video file
-            
-        Returns:
-            True if file was added
-        """
-        video_file = Path(video_path)
-        if video_file.exists() and video_file.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
-            self.video_files.append(str(video_file))
-            return True
-        return False
-    
-    def clear_queue(self):
-        """Clear the processing queue"""
-        self.video_files = []
-        self.processing_results = []
