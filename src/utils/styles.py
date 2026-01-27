@@ -149,10 +149,18 @@ QPushButton {
     background-color: #34495e; /* Dark Blue-Grey */
     color: white;
     border: none;
-    padding: 10px 20px;
-    border-radius: 6px;
+    padding: 8px 16px;
+    border-radius: 8px;
     font-weight: bold;
     min-width: 90px;
+    min-height: 32px;
+}
+
+QPushButton[class="toolbar-btn"] {
+    min-width: 72px;
+    min-height: 28px;
+    padding: 6px 12px;
+    font-weight: normal;
 }
 
 /* 统一变体（推荐用 property variant=primary|danger） */
@@ -204,7 +212,7 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QPlainTextEdit, QComboBox {
     color: white;
     selection-background-color: #00e676;
     selection-color: black;
-    min-height: 20px;
+     min-height: 32px;
 }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
     border: 1px solid #00e676;
@@ -399,6 +407,22 @@ QStatusBar {
     background-color: #1e1e1e;
     color: #bdc3c7;
     border-top: 1px solid #333333;
+}
+
+/* 菜单 (深色) */
+QMenu {
+    background-color: #2b2b2b;
+    color: #ecf0f1;
+    border: 1px solid #3b3b3b;
+}
+QMenu::item {
+    padding: 6px 18px;
+    background-color: transparent;
+    color: #ecf0f1;
+}
+QMenu::item:selected {
+    background-color: #3a3a3a;
+    color: #00e676;
 }
 
 /* 状态圆点（CRM 账号列表） */
@@ -907,6 +931,22 @@ QStatusBar {
     background-color: #ffffff;
     color: #5f6b7a;
     border-top: 1px solid #d9deea;
+}
+
+/* 菜单 (浅色) */
+QMenu {
+    background-color: #ffffff;
+    color: #1f2d3d;
+    border: 1px solid #d9deea;
+}
+QMenu::item {
+    padding: 6px 18px;
+    background-color: transparent;
+    color: #1f2d3d;
+}
+QMenu::item:selected {
+    background-color: #eef2f7;
+    color: #00b85c;
 }
 
 QLabel[role="status-dot"] {

@@ -64,7 +64,10 @@ class DashboardPanel(QWidget):
         h1.setObjectName("h1")
         title_box.addWidget(h1)
         
-        date_str = datetime.datetime.now().strftime("%Y年%m月%d日 %A")
+        now = datetime.datetime.now()
+        # 避免 strftime 在部分 locale 下的编码异常
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        date_str = f"{now.year}年{now.month:02d}月{now.day:02d}日 {weekdays[now.weekday()]}"
         sub = QLabel(f"欢迎回来，今日是 {date_str}")
         sub.setProperty("variant", "muted")
         title_box.addWidget(sub)

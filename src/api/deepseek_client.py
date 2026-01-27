@@ -13,12 +13,27 @@ class DeepSeekClient:
     """DeepSeek API 封装"""
     
     def __init__(self):
-        # 优先读取专门配置，否则尝试读取通用 AI 配置
-        self.api_key = getattr(config, "DEEPSEEK_API_KEY", "") or getattr(config, "AI_API_KEY", "")
-        self.base_url = getattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.model = getattr(config, "DEEPSEEK_MODEL", "deepseek-chat")
+        # 优先读取 DeepSeek 专用配置，其次回退到全局 AI 配置
+        self.api_key = (
+            getattr(config, "AI_DEEPSEEK_API_KEY", "")
+            or getattr(config, "AI_API_KEY", "")
+            or ""
+        ).strip()
+        self.base_url = (
+            getattr(config, "AI_DEEPSEEK_BASE_URL", "")
+            or getattr(config, "AI_BASE_URL", "")
+            or "https://api.deepseek.com"
+        ).strip()
+
+        # 模型优先级：DeepSeek 专用模型 > 全局模型 > 默认 deepseek-chat
+        self.model = (
+            getattr(config, "AI_DEEPSEEK_MODEL", "")
+            or getattr(config, "AI_MODEL", "")
+            or "deepseek-chat"
+        ).strip()
         
         self.client: Optional[OpenAI] = None
+        self._fingerprint = f"{self.api_key}|{self.base_url}|{self.model}"
         if self.api_key:
             try:
                 self.client = OpenAI(
@@ -31,8 +46,15 @@ class DeepSeekClient:
     def is_configured(self) -> bool:
         return bool(self.client and self.api_key)
 
-    def analyze_product_potential(self, product_title: str, price: float, sales: int) -> str:
-        """分析单一商品的市场潜力"""
+    def analyze_product_potential(self, product_title: str, price: float, sales: int, role_prompt: str = "") -> str:
+        """分析单一商品的市场潜力。
+
+        Args:
+            product_title: 商品标题
+            price: 售价
+            sales: 销量
+            role_prompt: 角色提示词（可选，优先于配置）
+        """
         if not self.is_configured():
             return "错误: 未配置 DeepSeek API Key，请在系统设置中填写。"
 
@@ -50,7 +72,18 @@ class DeepSeekClient:
         3. 建议的短视频营销痛点
         """
         
-        return self._chat_completion(prompt)
+        # 角色提示词（优先使用传入，其次使用选品参谋已保存配置）
+        extra_role = (
+            (role_prompt or "").strip()
+            or (getattr(config, "AI_PROFIT_ROLE_PROMPT", "") or "").strip()
+            or (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        )
+
+        system_prompt = "You are a helpful assistant for TikTok shop operations."
+        if extra_role:
+            system_prompt += "\n[ROLE_PROMPT]\n" + extra_role
+
+        return self._chat_completion(prompt, system_prompt=system_prompt)
 
     def optimize_dm_script(self, original_script: str, user_intent: str) -> str:
         """优化私信话术"""
@@ -65,12 +98,12 @@ class DeepSeekClient:
         """
         return self._chat_completion(prompt)
 
-    def _chat_completion(self, user_prompt: str) -> str:
+    def _chat_completion(self, user_prompt: str, system_prompt: str | None = None) -> str:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant for TikTok shop operations."},
+                    {"role": "system", "content": system_prompt or "You are a helpful assistant for TikTok shop operations."},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.7,
@@ -87,6 +120,13 @@ _global_deepseek = None
 
 def get_deepseek_client() -> DeepSeekClient:
     global _global_deepseek
+    current = DeepSeekClient()
     if _global_deepseek is None:
-        _global_deepseek = DeepSeekClient()
+        _global_deepseek = current
+        return _global_deepseek
+    try:
+        if getattr(_global_deepseek, "_fingerprint", "") != getattr(current, "_fingerprint", ""):
+            _global_deepseek = current
+    except Exception:
+        _global_deepseek = current
     return _global_deepseek

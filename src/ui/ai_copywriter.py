@@ -22,6 +22,7 @@ from pathlib import Path
 from workers.ai_worker import AICopyWorker
 from utils.ui_log import append_log, install_log_context_menu
 import config
+from ui.role_prompt_dialog import open_role_prompt_dialog
 
 
 class AICopywriterPanel(QWidget):
@@ -30,12 +31,6 @@ class AICopywriterPanel(QWidget):
         self.worker: AICopyWorker | None = None
         self._last_result: dict | None = None
         self._last_export_text: str = ""
-
-        # 自定义角色提示词：做一个轻量防抖，避免频繁写 .env
-        self._role_save_timer = QTimer(self)
-        self._role_save_timer.setSingleShot(True)
-        self._role_save_timer.setInterval(800)
-        self._role_save_timer.timeout.connect(self._persist_custom_role_prompt)
 
         self._init_ui()
 
@@ -100,23 +95,26 @@ class AICopywriterPanel(QWidget):
         options_row.addStretch(1)
         input_layout.addLayout(options_row)
 
-        input_layout.addWidget(QLabel("自定义角色提示词（可选，留空则使用预设/系统设置）："))
-        self.role_input = QTextEdit()
-        self.role_input.setPlaceholderText(
-            "例：你是一名强转化的 TikTok 带货主播，输出要更直接、更有号召力、更偏促销。"
-        )
-        self.role_input.setMaximumHeight(70)
-        # 回填上次保存的自定义角色提示词
-        try:
-            self.role_input.setText((getattr(config, "AI_COPYWRITER_ROLE_PROMPT", "") or ""))
-        except Exception:
-            pass
-        # 自动持久化：输入变化后延迟写入 .env
-        try:
-            self.role_input.textChanged.connect(self._schedule_persist_custom_role_prompt)
-        except Exception:
-            pass
-        input_layout.addWidget(self.role_input)
+        role_row = QHBoxLayout()
+        role_row.addWidget(QLabel("自定义角色提示词："))
+        role_btn = QPushButton("🎭 配置角色")
+        role_btn.setMinimumWidth(120)
+        role_btn.setFixedHeight(32)
+        role_btn.clicked.connect(self._open_role_prompt_dialog)
+        role_row.addStretch(1)
+        role_row.addWidget(role_btn)
+        input_layout.addLayout(role_row)
+
+        # 当前生效角色提示词预览
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(QLabel("当前生效角色提示词："))
+        preview_row.addStretch(1)
+        input_layout.addLayout(preview_row)
+        self.role_preview = QTextEdit()
+        self.role_preview.setReadOnly(True)
+        self.role_preview.setMinimumHeight(90)
+        self.role_preview.setPlaceholderText("将显示当前真正注入模型的角色提示词（含默认角色）。")
+        input_layout.addWidget(self.role_preview)
 
         actions_row = QHBoxLayout()
         self.gen_btn = QPushButton("生成文案")
@@ -141,6 +139,26 @@ class AICopywriterPanel(QWidget):
         layout.addWidget(input_frame)
 
         layout.addWidget(QLabel("输出："))
+
+        out_toolbar = QHBoxLayout()
+        btn_copy_out = QPushButton("复制输出")
+        btn_copy_out.setProperty("class", "toolbar-btn")
+        btn_copy_out.clicked.connect(self.copy_to_clipboard)
+        out_toolbar.addWidget(btn_copy_out)
+
+        btn_clear_out = QPushButton("清空输出")
+        btn_clear_out.setProperty("class", "toolbar-btn")
+        btn_clear_out.clicked.connect(self._clear_output)
+        out_toolbar.addWidget(btn_clear_out)
+
+        btn_open_out = QPushButton("打开输出目录")
+        btn_open_out.setProperty("class", "toolbar-btn")
+        btn_open_out.clicked.connect(self._open_output_dir)
+        out_toolbar.addWidget(btn_open_out)
+
+        out_toolbar.addStretch(1)
+        layout.addLayout(out_toolbar)
+
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         self.output.setObjectName("LogView")
@@ -150,23 +168,81 @@ class AICopywriterPanel(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
+        try:
+            self.role_combo.currentIndexChanged.connect(self._update_role_preview)
+        except Exception:
+            pass
+        self._update_role_preview()
+
+    def _open_role_prompt_dialog(self) -> None:
+        """配置文案助手角色提示词（持久化到 .env）。"""
+        current = (getattr(config, "AI_COPYWRITER_ROLE_PROMPT", "") or "").strip()
+        text = open_role_prompt_dialog(
+            self,
+            title="AI 文案助手角色提示词",
+            initial_text=current,
+            help_text="将作为系统提示词注入文案生成，影响风格与措辞。",
+        )
+        if text is None:
+            return
+        try:
+            config.set_config("AI_COPYWRITER_ROLE_PROMPT", text, persist=True, hot_reload=False)
+            self._update_role_preview()
+        except Exception:
+            pass
+
+    def _update_role_preview(self) -> None:
+        """刷新当前生效角色提示词预览。"""
+        custom = (getattr(config, "AI_COPYWRITER_ROLE_PROMPT", "") or "").strip()
+        if custom:
+            self.role_preview.setPlainText(custom)
+            return
+
+        # 预设角色
+        preset = self._role_prompt_from_ui().strip()
+        if preset:
+            self.role_preview.setPlainText(preset)
+            return
+
+        # 面板已保存 / 系统设置 / 默认内置
+        system_saved = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        if system_saved:
+            self.role_preview.setPlainText(system_saved)
+            return
+
+        base_system = (
+            "你是一名非常懂 TikTok 带货的视频文案专家。\n"
+            "你必须只输出 JSON，不要输出任何解释、Markdown、代码块或多余文本。\n"
+            "JSON 的字段必须包含：titles / hashtags / notes。\n"
+            "【重要】角色提示词只影响风格，不允许改变 JSON 结构。"
+        )
+        self.role_preview.setPlainText(base_system)
+
+    def _clear_output(self) -> None:
+        try:
+            self.output.clear()
+        except Exception:
+            pass
+
+    def _open_output_dir(self) -> None:
+        try:
+            base_dir = Path(getattr(config, "OUTPUT_DIR", Path("Output"))) / "AI_Copywriter"
+            base_dir.mkdir(parents=True, exist_ok=True)
+            import os
+            os.startfile(str(base_dir))
+        except Exception:
+            pass
+
     def _append(self, text: str):
         append_log(self.output, text, level="INFO")
 
     def _schedule_persist_custom_role_prompt(self) -> None:
-        try:
-            self._role_save_timer.start()
-        except Exception:
-            pass
+        # 已改为弹窗保存，不再使用输入框防抖保存
+        return
 
     def _persist_custom_role_prompt(self) -> None:
-        try:
-            text = (self.role_input.toPlainText() if hasattr(self, "role_input") else "")
-            text = (text or "").strip()
-            config.set_config("AI_COPYWRITER_ROLE_PROMPT", text, persist=True, hot_reload=False)
-        except Exception:
-            # 不影响主流程
-            pass
+        # 已改为弹窗保存，不再使用输入框持久化
+        return
 
     def generate(self):
         if self.worker:
@@ -218,8 +294,8 @@ class AICopywriterPanel(QWidget):
         self._append("\n提示：可点击【一键复制】或【一键下载TXT】保存。")
 
     def _role_prompt_from_ui(self) -> str:
-        # 1) 自定义优先
-        custom = (self.role_input.toPlainText() if hasattr(self, "role_input") else "").strip()
+        # 1) 自定义优先（已保存）
+        custom = (getattr(config, "AI_COPYWRITER_ROLE_PROMPT", "") or "").strip()
         if custom:
             return custom
 

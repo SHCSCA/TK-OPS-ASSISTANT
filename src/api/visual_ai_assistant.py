@@ -24,6 +24,7 @@ class VisualAIAssistant:
         base_url: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        role_prompt: str | None = None,
     ):
         profile = resolve_ai_profile(
             "vision",
@@ -33,6 +34,7 @@ class VisualAIAssistant:
         self.api_key = (api_key or profile.get("api_key", "") or "").strip()
         self.base_url = (base_url or profile.get("base_url", "") or "").strip()
         self.model = (model or profile.get("model", "") or "").strip()
+        self.role_prompt = (role_prompt or "").strip()
 
     def analyze_frames(self, frames_b64: Iterable[str], prompt: str) -> str:
         """分析连续视频帧并返回模型输出文本。"""
@@ -62,10 +64,21 @@ class VisualAIAssistant:
         for url in images:
             content.append({"type": "image_url", "image_url": {"url": url}})
 
+        # 角色提示词（优先使用本次传入，其次使用视觉实验室已保存配置）
+        extra_role = (
+            (self.role_prompt or "").strip()
+            or (getattr(__import__("config"), "AI_VISION_ROLE_PROMPT", "") or "").strip()
+            or (getattr(__import__("config"), "AI_SYSTEM_PROMPT", "") or "").strip()
+        )
+        messages = []
+        if extra_role:
+            messages.append({"role": "system", "content": extra_role})
+        messages.append({"role": "user", "content": content})
+
         try:
             resp = client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": content}],
+                messages=messages,
                 temperature=0.4,
                 max_tokens=4096,
             )

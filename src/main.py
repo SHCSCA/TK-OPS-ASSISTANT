@@ -51,6 +51,8 @@ _ensure_single_sip_module()
 
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtGui import QIcon
+from pathlib import Path
 
 # 引入日志管理器和全局样式
 from utils.logger import LoggerManager, logger
@@ -138,6 +140,24 @@ def main():
     sys.excepthook = global_exception_handler
 
     app = QApplication(sys.argv)
+
+    def _get_app_icon_path() -> Path | None:
+        """获取应用图标路径（兼容开发/冻结态）。"""
+        try:
+            base_dir = Path(getattr(sys, "_MEIPASS", str(config.BASE_DIR)))
+            icon_path = base_dir / "icon.ico"
+            if icon_path.exists():
+                return icon_path
+        except Exception:
+            pass
+        return None
+
+    icon_path = _get_app_icon_path()
+    if icon_path:
+        try:
+            app.setWindowIcon(QIcon(str(icon_path)))
+        except Exception:
+            pass
     
     # 设置全局样式表（统一入口，避免局部 setStyleSheet 覆盖主题）
     theme_mode = getattr(config, "THEME_MODE", "dark")

@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QComboBox, QApplication, QScrollArea, QSizePolicy, QTextEdit
 )
 from PyQt5.QtGui import QFont, QImage, QColor
-from PyQt5.QtCore import Qt, QBuffer, QByteArray
+from PyQt5.QtCore import Qt, QBuffer, QByteArray, QTimer
 from api.echotik_api import EchoTikApiClient
 import config
 from pathlib import Path
@@ -36,7 +36,8 @@ class SettingsPanel(QWidget):
         super().__init__()
         self._init_ui()
         try:
-            self._auto_refresh_providers_on_startup()
+            # 延迟执行，避免首次进入配置中心卡顿
+            QTimer.singleShot(200, self._auto_refresh_providers_on_startup)
         except Exception:
             pass
     
@@ -65,10 +66,11 @@ class SettingsPanel(QWidget):
         title_font.setBold(True)
         content_layout.addWidget(title)
 
-        # API Configuration
-        api_frame = self._create_api_config_frame()
-        api_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        content_layout.addWidget(api_frame)
+        # API Configuration (EchoTik) - 默认隐藏
+        if getattr(config, "SHOW_ECHOTIK_SETTINGS", False):
+            api_frame = self._create_api_config_frame()
+            api_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            content_layout.addWidget(api_frame)
 
         # AI Configuration
         ai_frame = self._create_ai_config_frame()
@@ -383,25 +385,56 @@ class SettingsPanel(QWidget):
         layout.addWidget(task_hint)
 
         # 高级配置（任务级 Base URL / API Key）
-        advanced_toggle_row = QHBoxLayout()
-        self.ai_advanced_toggle_btn = QPushButton("显示高级配置")
-        self.ai_advanced_toggle_btn.setCheckable(True)
-        self.ai_advanced_toggle_btn.setChecked(False)
-        advanced_toggle_row.addWidget(self.ai_advanced_toggle_btn)
-        advanced_toggle_row.addStretch(1)
-        layout.addLayout(advanced_toggle_row)
+        self.ai_adv_btn = QPushButton("⬇️  显示高级配置 (任务级 Base URL / API Key)")
+        self.ai_adv_btn.setCursor(Qt.PointingHandCursor)
+        self.ai_adv_btn.setCheckable(True)
+        self.ai_adv_btn.setChecked(False)
+        self.ai_adv_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left; 
+                padding: 10px; 
+                font-weight: bold;
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:checked {
+                background-color: #e9ecef;
+                border-bottom-left-radius: 0;
+                border-bottom-right-radius: 0;
+                border-bottom: 1px dashed #ced4da;
+            }
+        """)
 
-        self.ai_advanced_frame = QFrame()
-        self.ai_advanced_frame.setProperty("class", "config-frame")
+        self.ai_advanced_frame = QWidget()
+        self.ai_advanced_frame.setObjectName("AdvSettingsContainer_Settings")
+        self.ai_advanced_frame.setStyleSheet("""
+            #AdvSettingsContainer_Settings {
+                background-color: #fcfcfc;
+                border: 1px solid #dee2e6;
+                border-top: none;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+            }
+        """)
         self.ai_advanced_frame.setVisible(False)
+        
         advanced_layout = QVBoxLayout(self.ai_advanced_frame)
-        advanced_layout.setContentsMargins(12, 12, 12, 12)
-        advanced_layout.setSpacing(10)
+        advanced_layout.setContentsMargins(20, 20, 20, 20)
+        advanced_layout.setSpacing(15)
 
         def _toggle_advanced(checked: bool) -> None:
             self.ai_advanced_frame.setVisible(bool(checked))
-            self.ai_advanced_toggle_btn.setText("隐藏高级配置" if checked else "显示高级配置")
-        self.ai_advanced_toggle_btn.toggled.connect(_toggle_advanced)
+            arrow = "⬆️" if checked else "⬇️"
+            self.ai_adv_btn.setText(f"{arrow}  {'隐藏' if checked else '显示'}高级配置 (任务级 Base URL / API Key)")
+        self.ai_adv_btn.toggled.connect(_toggle_advanced)
+
+        layout.addWidget(self.ai_adv_btn)
+        layout.addWidget(self.ai_advanced_frame)
 
         # 文案助手
         copy_model_row = QHBoxLayout()
@@ -655,9 +688,9 @@ class SettingsPanel(QWidget):
 
         # 初始化任务级模型下拉
         self._refresh_task_model_combos()
-
-        layout.addWidget(self.ai_advanced_frame)
-
+        
+        # layout.addWidget(self.ai_advanced_frame) # Removed as it's added above
+        
         frame.setLayout(layout)
         return frame
 
@@ -690,6 +723,7 @@ class SettingsPanel(QWidget):
         models = get_provider_models(provider) if provider else []
         try:
             combo.blockSignals(True)
+            current_text = combo.currentText().strip() if combo.currentText() else ""
             combo.clear()
             clean_models = [m for m in (models or []) if m]
             if clean_models:
@@ -699,6 +733,16 @@ class SettingsPanel(QWidget):
                     combo.addItem(fallback)
                 else:
                     combo.addItem("（未获取模型）")
+            # 尽量保留用户当前选择，避免刷新后“重置”
+            desired = current_text or (fallback or "").strip()
+            if desired:
+                idx = combo.findText(desired)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                else:
+                    # 若模型不在列表中，追加并选中（兼容手动填写/历史配置）
+                    combo.addItem(desired)
+                    combo.setCurrentIndex(combo.findText(desired))
         finally:
             try:
                 combo.blockSignals(False)
@@ -756,7 +800,7 @@ class SettingsPanel(QWidget):
                 combo = (self._provider_model_combos or {}).get(provider)
                 if combo is None:
                     continue
-                self._fetch_models_with(self._provider_title(provider), api_key, base_url, combo)
+                self._fetch_models_with(self._provider_title(provider), api_key, base_url, combo, silent_if_success=True)
                 models = [combo.itemText(i) for i in range(combo.count()) if combo.itemText(i)]
                 models = [m for m in models if "未获取" not in m]
                 if models:
@@ -945,6 +989,25 @@ class SettingsPanel(QWidget):
             temperature=0,
         )
 
+    def _show_status_message(self, message: str, timeout_ms: int = 5000) -> bool:
+        """在主窗口状态栏显示消息（兼容 statusBar 方法与同名属性）。"""
+        try:
+            win = self.window()
+            if not win:
+                return False
+            candidate = getattr(win, "statusBar", None)
+            status_bar = None
+            if callable(candidate):
+                status_bar = candidate()
+            elif candidate is not None and hasattr(candidate, "showMessage"):
+                status_bar = candidate
+            if status_bar:
+                status_bar.showMessage(message, timeout_ms)
+                return True
+        except Exception:
+            pass
+        return False
+
     def _test_ai_connection_with(self, title: str, api_key: str, base_url: str, model: str = ""):
         if not api_key:
             raise ValueError("API Key 为空")
@@ -958,18 +1021,14 @@ class SettingsPanel(QWidget):
             try:
                 models = client.models.list()
                 count = len(getattr(models, "data", []) or [])
-                QMessageBox.information(self, "连接成功", f"{title} 可用。可用模型数量：{count}")
+                # 成功情况：不弹框
+                self._show_status_message(f"{title} 连接成功，可用模型数量：{count}")
                 return
             except Exception as e:
                 # 某些服务不支持 /models：降级为最小推理探测
                 if self._looks_like_models_not_supported(e):
                     self._probe_ai_minimal(client, model=model)
-                    QMessageBox.information(
-                        self,
-                        "连接成功",
-                        f"{title} 可用（提示：当前服务不支持自动获取模型列表 /models，已改用最小推理探测）。\n"
-                        "如需查询 Model ID，请到火山方舟【模型列表】页查看。",
-                    )
+                    self._show_status_message(f"{title} 连接成功 (Minimal Probe)")
                     return
                 raise
         except Exception as e:
@@ -996,18 +1055,16 @@ class SettingsPanel(QWidget):
             try:
                 models = client.models.list()
                 count = len(getattr(models, "data", []) or [])
-                QMessageBox.information(self, "连接成功", f"AI 可用。可用模型数量：{count}")
+                self._show_status_message(f"连接成功！AI 可用。可用模型数量：{count}")
+                # QMessageBox.information(self, "连接成功", f"AI 可用。可用模型数量：{count}")
                 return
             except Exception as e:
                 # 某些服务不支持 /models：降级为最小推理探测
                 if self._looks_like_models_not_supported(e):
                     self._probe_ai_minimal(client, model=model)
-                    QMessageBox.information(
-                        self,
-                        "连接成功",
-                        "AI 可用（提示：当前服务不支持自动获取模型列表 /models，已改用最小推理探测）。\n"
-                        "如需查询 Model ID，请到火山方舟【模型列表】页查看。",
-                    )
+                    msg = "AI 可用（服务不支持 /models，仅推理可用）。"
+                    self._show_status_message(f"连接成功！{msg}")
+                    # QMessageBox.information(self, "连接成功", msg + "\n如需查询 Model ID，请到火山方舟【模型列表】页查看。")
                     return
                 raise
         except Exception as e:
@@ -1062,7 +1119,7 @@ class SettingsPanel(QWidget):
 
             _fill(self.ai_model_combo, current)
 
-            QMessageBox.information(self, "成功", f"已加载 {len(items)} 个模型。")
+            self._show_status_message(f"已加载 {len(items)} 个模型")
         except Exception as e:
             QMessageBox.critical(self, "失败", f"获取模型列表失败：{e}")
         finally:
@@ -1070,7 +1127,7 @@ class SettingsPanel(QWidget):
                 btn.setEnabled(True)
                 btn.setText("获取模型")
 
-    def _fetch_models_with(self, title: str, api_key: str, base_url: str, target_combo: QComboBox, target_input: QLineEdit | None = None) -> None:
+    def _fetch_models_with(self, title: str, api_key: str, base_url: str, target_combo: QComboBox, target_input: QLineEdit | None = None, silent_if_success: bool = False) -> None:
         if not api_key:
             raise ValueError("API Key 为空")
 
@@ -1115,7 +1172,8 @@ class SettingsPanel(QWidget):
             except Exception:
                 pass
 
-        QMessageBox.information(self, "成功", f"{title} 已加载 {len(items)} 个模型。")
+        if not silent_if_success:
+            QMessageBox.information(self, "成功", f"{title} 已加载 {len(items)} 个模型。")
 
     def _create_other_config_frame(self) -> QFrame:
         """Create other configuration frame"""
@@ -1731,13 +1789,14 @@ class SettingsPanel(QWidget):
     def save_settings(self):
         """保存设置到 .env，并热更新内存配置。"""
         try:
-            # 1. Get values from UI
-            api_key = self.api_key_input.text().strip()
-            api_secret = self.api_secret_input.text().strip()
+            # 1. Get values from UI（EchoTik 可选）
+            if hasattr(self, "api_key_input") and hasattr(self, "api_secret_input"):
+                api_key = self.api_key_input.text().strip()
+                api_secret = self.api_secret_input.text().strip()
 
-            # 2. 统一入口写配置（写回 .env + 热更新内存）
-            config.set_config("ECHOTIK_API_KEY", api_key, persist=True, hot_reload=False)
-            config.set_config("ECHOTIK_API_SECRET", api_secret, persist=True, hot_reload=False)
+                # 2. 统一入口写配置（写回 .env + 热更新内存）
+                config.set_config("ECHOTIK_API_KEY", api_key, persist=True, hot_reload=False)
+                config.set_config("ECHOTIK_API_SECRET", api_secret, persist=True, hot_reload=False)
 
             # AI
             ai_provider = self.ai_provider_input.text().strip() or "openai"

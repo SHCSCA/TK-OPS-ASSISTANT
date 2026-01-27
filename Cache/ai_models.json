@@ -108,8 +108,8 @@
         "wan2-1-14b-t2v-250225"
       ],
       "ok": true,
-      "message": "启动自动刷新",
-      "updated_at": 1769159813
+      "message": "连通正常",
+      "updated_at": 1769496544
     },
     "deepseek": {
       "models": [
@@ -118,10 +118,11 @@
       ],
       "ok": true,
       "message": "启动自动刷新",
-      "updated_at": 1769159816
+      "updated_at": 1769496537
     },
     "qwen": {
       "models": [
+        "MiniMax-M2.1",
         "codeqwen1.5-7b-chat",
         "deepseek-r1",
         "deepseek-r1-distill-llama-70b",
@@ -263,6 +264,7 @@
         "qwen3-livetranslate-flash-realtime",
         "qwen3-livetranslate-flash-realtime-2025-09-22",
         "qwen3-max-2025-09-23",
+        "qwen3-max-2026-01-23",
         "qwen3-max-preview",
         "qwen3-next-80b-a3b-instruct",
         "qwen3-next-80b-a3b-thinking",
@@ -284,6 +286,7 @@
         "qwen3-tts-vd-realtime-2025-12-16",
         "qwen3-vl-flash",
         "qwen3-vl-flash-2025-10-15",
+        "qwen3-vl-flash-2026-01-22",
         "qwen3-vl-plus",
         "qwen3-vl-plus-2025-09-23",
         "qwen3-vl-plus-2025-12-19",
@@ -292,8 +295,8 @@
         "z-image-turbo"
       ],
       "ok": true,
-      "message": "启动自动刷新",
-      "updated_at": 1769159814
+      "message": "连通正常",
+      "updated_at": 1769496562
     }
   }
 }

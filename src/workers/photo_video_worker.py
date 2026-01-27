@@ -146,6 +146,17 @@ class PhotoVideoWorker(BaseWorker):
             self.emit_finished(False, "图转视频失败")
             return
 
+        # 二次校验成片是否真实落盘
+        try:
+            if not Path(video_path).exists():
+                self.emit_log(f"❌ 成片未找到：{video_path}")
+                self.emit_finished(False, "图转视频完成但未找到成片文件，请检查输出目录")
+                return
+        except Exception:
+            pass
+
+        self.emit_log(f"✅ 成片路径：{video_path}")
+
         # 可选：烧录字幕
         if srt_path:
             burned = self._burn_subtitles_ffmpeg(input_video_path=video_path, srt_path=str(srt_path))
