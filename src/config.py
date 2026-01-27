@@ -123,11 +123,26 @@ RAPIDAPI_HOST = _clean_env_value(os.getenv("RAPIDAPI_HOST", ""))
 # 日志级别（默认 INFO）
 LOG_LEVEL = (_clean_env_value(os.getenv("LOG_LEVEL", "INFO")) or "INFO").upper()
 
-# 主题模式：dark / light
-THEME_MODE = _clean_env_value(os.getenv("THEME_MODE", "dark")) or "dark"
+# 主题模式：dark / light（默认浅色）
+THEME_MODE = _clean_env_value(os.getenv("THEME_MODE", "light")) or "light"
+
+# 是否显示 EchoTik 配置（默认隐藏）
+SHOW_ECHOTIK_SETTINGS = _clean_env_value(os.getenv("SHOW_ECHOTIK_SETTINGS", "false")).lower() == "true"
 
 # 应用版本（用于启动日志/诊断输出）
-APP_VERSION = _clean_env_value(os.getenv("APP_VERSION", "1.0")) or "1.0"
+def _load_app_version() -> str:
+	"""优先读取本地版本文件，其次读取环境变量。"""
+	try:
+		ver_file = BASE_DIR / "APP_VERSION.txt"
+		if ver_file.exists():
+			text = (ver_file.read_text(encoding="utf-8") or "").strip()
+			if text:
+				return text
+	except Exception:
+		pass
+	return _clean_env_value(os.getenv("APP_VERSION", APP_VERSION)) or APP_VERSION
+
+APP_VERSION = _load_app_version()
 
 # ===================================================
 # AI 文案助手配置
@@ -149,6 +164,7 @@ AI_QWEN_API_KEY = _clean_env_value(os.getenv("AI_QWEN_API_KEY", ""))
 AI_QWEN_BASE_URL = _clean_env_value(os.getenv("AI_QWEN_BASE_URL", ""))
 AI_DEEPSEEK_API_KEY = _clean_env_value(os.getenv("AI_DEEPSEEK_API_KEY", ""))
 AI_DEEPSEEK_BASE_URL = _clean_env_value(os.getenv("AI_DEEPSEEK_BASE_URL", ""))
+AI_DEEPSEEK_MODEL = _clean_env_value(os.getenv("AI_DEEPSEEK_MODEL", ""))
 
 # 任务级选择供应商（可选）
 AI_COPYWRITER_PROVIDER = _clean_env_value(os.getenv("AI_COPYWRITER_PROVIDER", ""))
@@ -182,9 +198,12 @@ AI_VISION_BASE_URL = _clean_env_value(os.getenv("AI_VISION_BASE_URL", ""))
 # 这里保持默认不发送，由用户按需配置：enabled / disabled（以官方文档为准）。
 ARK_THINKING_TYPE = _clean_env_value(os.getenv("ARK_THINKING_TYPE", ""))
 
-# 面板级“自定义角色提示词”（用于：AI 文案助手/AI 二创工厂的输入框，自动持久化）
+# 面板级“自定义角色提示词”（用于：各 AI 功能面板的配置按钮）
 AI_COPYWRITER_ROLE_PROMPT = _clean_env_value(os.getenv("AI_COPYWRITER_ROLE_PROMPT", ""))
 AI_FACTORY_ROLE_PROMPT = _clean_env_value(os.getenv("AI_FACTORY_ROLE_PROMPT", ""))
+AI_PHOTO_ROLE_PROMPT = _clean_env_value(os.getenv("AI_PHOTO_ROLE_PROMPT", ""))
+AI_VISION_ROLE_PROMPT = _clean_env_value(os.getenv("AI_VISION_ROLE_PROMPT", ""))
+AI_PROFIT_ROLE_PROMPT = _clean_env_value(os.getenv("AI_PROFIT_ROLE_PROMPT", ""))
 
 # 生成结果语言
 AI_OUTPUT_LANG = _clean_env_value(os.getenv("AI_OUTPUT_LANG", "en")) or "en"
@@ -453,9 +472,10 @@ def reload_config() -> None:
 	global AI_PHOTO_API_KEY, AI_PHOTO_BASE_URL, AI_PHOTO_MODEL
 	global AI_DOUBAO_API_KEY, AI_DOUBAO_BASE_URL
 	global AI_QWEN_API_KEY, AI_QWEN_BASE_URL
-	global AI_DEEPSEEK_API_KEY, AI_DEEPSEEK_BASE_URL
+	global AI_DEEPSEEK_API_KEY, AI_DEEPSEEK_BASE_URL, AI_DEEPSEEK_MODEL
 	global AI_COPYWRITER_PROVIDER, AI_FACTORY_PROVIDER, AI_TIMELINE_PROVIDER, AI_PHOTO_PROVIDER, AI_VISION_PROVIDER
 	global AI_SYSTEM_PROMPT, AI_COPYWRITER_ROLE_PROMPT, AI_FACTORY_ROLE_PROMPT
+	global AI_PHOTO_ROLE_PROMPT, AI_VISION_ROLE_PROMPT, AI_PROFIT_ROLE_PROMPT
 	global AI_OUTPUT_LANG
 	global ARK_THINKING_TYPE
 	global TTS_PROVIDER, TTS_FALLBACK_PROVIDER, TTS_VOICE, TTS_SPEED
@@ -505,6 +525,7 @@ def reload_config() -> None:
 	AI_QWEN_BASE_URL = _clean_env_value(os.getenv("AI_QWEN_BASE_URL", ""))
 	AI_DEEPSEEK_API_KEY = _clean_env_value(os.getenv("AI_DEEPSEEK_API_KEY", ""))
 	AI_DEEPSEEK_BASE_URL = _clean_env_value(os.getenv("AI_DEEPSEEK_BASE_URL", ""))
+	AI_DEEPSEEK_MODEL = _clean_env_value(os.getenv("AI_DEEPSEEK_MODEL", ""))
 
 	AI_COPYWRITER_PROVIDER = _clean_env_value(os.getenv("AI_COPYWRITER_PROVIDER", ""))
 	AI_FACTORY_PROVIDER = _clean_env_value(os.getenv("AI_FACTORY_PROVIDER", ""))
@@ -529,6 +550,9 @@ def reload_config() -> None:
 	ARK_THINKING_TYPE = _clean_env_value(os.getenv("ARK_THINKING_TYPE", ""))
 	AI_COPYWRITER_ROLE_PROMPT = _clean_env_value(os.getenv("AI_COPYWRITER_ROLE_PROMPT", ""))
 	AI_FACTORY_ROLE_PROMPT = _clean_env_value(os.getenv("AI_FACTORY_ROLE_PROMPT", ""))
+	AI_PHOTO_ROLE_PROMPT = _clean_env_value(os.getenv("AI_PHOTO_ROLE_PROMPT", ""))
+	AI_VISION_ROLE_PROMPT = _clean_env_value(os.getenv("AI_VISION_ROLE_PROMPT", ""))
+	AI_PROFIT_ROLE_PROMPT = _clean_env_value(os.getenv("AI_PROFIT_ROLE_PROMPT", ""))
 
 	TTS_PROVIDER = _clean_env_value(os.getenv("TTS_PROVIDER", "edge-tts")) or "edge-tts"
 	TTS_FALLBACK_PROVIDER = _clean_env_value(os.getenv("TTS_FALLBACK_PROVIDER", ""))
@@ -709,6 +733,7 @@ def sync_env_file() -> None:
 		"AI_QWEN_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		"AI_DEEPSEEK_API_KEY": "",
 		"AI_DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+		"AI_DEEPSEEK_MODEL": "deepseek-chat",
 		"AI_COPYWRITER_PROVIDER": "",
 		"AI_FACTORY_PROVIDER": "",
 		"AI_TIMELINE_PROVIDER": "",
@@ -730,6 +755,9 @@ def sync_env_file() -> None:
 		"AI_PHOTO_MODEL": "",
 		"AI_COPYWRITER_ROLE_PROMPT": "",
 		"AI_FACTORY_ROLE_PROMPT": "",
+		"AI_PHOTO_ROLE_PROMPT": "",
+		"AI_VISION_ROLE_PROMPT": "",
+		"AI_PROFIT_ROLE_PROMPT": "",
 		"AI_OUTPUT_LANG": "en",
 		"TTS_PROVIDER": "edge-tts",
 		"TTS_FALLBACK_PROVIDER": "",

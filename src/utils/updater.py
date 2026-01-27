@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import tarfile
 import shutil
 from pathlib import Path
 from packaging import version
@@ -39,8 +40,8 @@ def _parse_github_release(data: dict) -> tuple[str, str, str]:
     assets = data.get("assets", [])
     for asset in assets:
         name = (asset.get("name", "") or "").lower()
-        # 仅接受 exe（用户发布的是可执行程序）
-        if name.endswith(".exe"):
+        # 接受 exe / zip / tar.gz
+        if name.endswith(".exe") or name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz"):
             download_url = asset.get("browser_download_url", "")
             break
     body = data.get("body", "No release notes.")
@@ -53,8 +54,8 @@ def _parse_gitee_release(data: dict) -> tuple[str, str, str]:
     assets = data.get("assets", [])
     for asset in assets:
         name = (asset.get("name", "") or "").lower()
-        # 仅接受 exe（用户发布的是可执行程序）
-        if name.endswith(".exe"):
+        # 接受 exe / zip / tar.gz
+        if name.endswith(".exe") or name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz"):
             download_url = asset.get("browser_download_url", "") or asset.get("url", "")
             break
     body = data.get("body", "No release notes.")
@@ -180,12 +181,12 @@ class UpdateChecker(QThread):
             
             if remote_ver > local_ver:
                 if not download_url:
-                    logger.warning("Release 缺少 exe 资产，无法更新")
+                    logger.warning("Release 缺少可下载资产（exe/zip/tar.gz），无法更新")
                     try:
-                        print("[UPDATE] Release 缺少 exe 资产，无法更新")
+                        print("[UPDATE] Release 缺少可下载资产（exe/zip/tar.gz），无法更新")
                     except Exception:
                         pass
-                    self.check_finished.emit(False, "Release missing exe asset")
+                    self.check_finished.emit(False, "Release missing update asset")
                     return
                 logger.info(f"发现新版本：{remote_ver_str} -> {download_url}")
                 try:
@@ -282,7 +283,7 @@ class AutoUpdater:
     自动更新执行器（Windows）
     """
     @staticmethod
-    def install_and_restart(installer_path: str):
+    def install_and_restart(installer_path: str, target_version: str = ""):
         """
         生成 bat 脚本，关闭当前进程，替换文件（或运行安装包），重启。
         支持 .exe 直接替换 或 .zip 解压替换
@@ -352,6 +353,32 @@ class AutoUpdater:
                     logger.error(f"Failed to extract zip: {e}")
                     return False
 
+            # Handle TAR.GZ / TGZ: Extract and find the EXE
+            if installer_path.lower().endswith(".tar.gz") or installer_path.lower().endswith(".tgz"):
+                try:
+                    extract_dir = os.path.join(tempfile.gettempdir(), f"tk_update_{int(time.time())}")
+                    with tarfile.open(installer_path, "r:gz") as tar_ref:
+                        tar_ref.extractall(extract_dir)
+
+                    exes = list(Path(extract_dir).rglob("*.exe"))
+                    if not exes:
+                        logger.error("No executable found in update tar.gz")
+                        return False
+
+                    current_name = Path(current_exe).name
+                    found_exe = None
+                    for e in exes:
+                        if e.name == current_name:
+                            found_exe = str(e)
+                            break
+                    if not found_exe:
+                        found_exe = str(max(exes, key=lambda p: p.stat().st_size))
+
+                    file_to_swap = found_exe
+                except Exception as e:
+                    logger.error(f"Failed to extract tar.gz: {e}")
+                    return False
+
             # Generic Swap Logic
             current_dir = os.path.dirname(current_exe)
             current_exe_name = os.path.basename(current_exe)
@@ -368,6 +395,10 @@ class AutoUpdater:
             # Note: We can't delete current.exe.old immediately if it's still locked, 
             # but usually renaming is allowed.
             
+            version_line = ""
+            if target_version:
+                version_line = f"echo {target_version} > \"{os.path.join(current_dir, 'APP_VERSION.txt')}\""
+
             batch_content = f"""
 @echo off
 timeout /t 2 /nobreak >nul
@@ -386,6 +417,8 @@ if errorlevel 1 (
     pause
     exit
 )
+
+{version_line}
 
 start "" "{current_exe}"
 del "{installer_path}"

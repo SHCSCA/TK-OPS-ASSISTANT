@@ -307,13 +307,16 @@ def generate_video_from_image(
                     return False, f"提取 base64 视频失败：{e}"
 
             # 保存完整响应到调试文件，便于离线排查
+            debug_path = None
             try:
                 debug_path = out_path.with_suffix(out_path.suffix + ".response.json")
                 debug_path.parent.mkdir(parents=True, exist_ok=True)
                 debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
-                pass
+                debug_path = None
 
+            if debug_path:
+                return False, f"任务完成但未返回视频链接; debug={str(debug_path)}"
             return False, "任务完成但未返回视频链接"
         if status in ("failed", "error"):
             return False, f"任务失败：{json.dumps(payload, ensure_ascii=False)[:200]}"

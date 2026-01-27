@@ -5,7 +5,8 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTableWidget, QTableWidgetItem, QHeaderView, 
                              QLabel, QFileDialog, QMenu, QProgressBar, QMessageBox,
-                             QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QApplication)
+                             QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QApplication,
+                             QTextEdit)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent
 import config
@@ -15,6 +16,7 @@ from pathlib import Path
 import webbrowser
 import urllib.parse
 from ui.toast import Toast
+from ui.role_prompt_dialog import open_role_prompt_dialog
 
 # ORM Imports
 from db.core import SessionLocal
@@ -112,9 +114,14 @@ class ProfitAnalysisWidget(QWidget):
         param_bar.addWidget(self.param_label)
         
         btn_config = QPushButton("⚙️ 配置参数")
-        btn_config.setFixedSize(90, 26)
+        btn_config.setFixedSize(90, 35)
         btn_config.clicked.connect(self.open_config_dialog)
         param_bar.addWidget(btn_config)
+
+        btn_role = QPushButton("🎭 配置AI角色")
+        btn_role.setFixedSize(120, 35)
+        btn_role.clicked.connect(self.open_ai_role_dialog)
+        param_bar.addWidget(btn_role)
         
         param_bar.addStretch() # Ensure left alignment
         
@@ -153,6 +160,9 @@ class ProfitAnalysisWidget(QWidget):
         layout.addLayout(top_bar)
         layout.addLayout(param_bar)
         layout.addWidget(self.progress_bar)
+
+        # role_frame removed
+        
         layout.addWidget(self.table)
         
         # 启用拖拽
@@ -179,6 +189,23 @@ class ProfitAnalysisWidget(QWidget):
         )
         if fname:
             self.start_parsing(fname)
+
+    def open_ai_role_dialog(self):
+        """配置 AI 选品参谋的角色提示词（持久化到 .env）。"""
+        current = (getattr(config, "AI_PROFIT_ROLE_PROMPT", "") or "").strip()
+        text = open_role_prompt_dialog(
+            self,
+            title="AI 选品参谋角色提示词",
+            initial_text=current,
+            help_text="将作为系统提示词注入选品分析，影响分析角度与输出风格。",
+        )
+        if text is None:
+            return
+        try:
+            config.set_config("AI_PROFIT_ROLE_PROMPT", text, persist=True, hot_reload=False)
+        except Exception:
+            pass
+        # Preview update removed
 
     def start_parsing(self, file_path):
         """启动 Worker 线程解析 Excel"""

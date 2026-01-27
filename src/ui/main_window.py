@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QStackedWidget, QFrame, QMessageBox, QProgressDialog
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtCore import QTimer
 import sys
 import config
@@ -45,8 +45,13 @@ class LazyLoader(QWidget):
             self.real_widget = self.factory()
             self._layout.addWidget(self.real_widget)
         except Exception as e:
-            # 容错显示
-            err_label = QLabel(f"模块加载失败:\n{e}")
+            # 容错显示（明确缺失模块名）
+            missing = getattr(e, "name", None)
+            if missing:
+                msg = f"模块加载失败：缺少模块 {missing}"
+            else:
+                msg = f"模块加载失败：{e}"
+            err_label = QLabel(msg)
             err_label.setAlignment(Qt.AlignCenter)
             self._layout.addWidget(err_label)
             import logging
@@ -78,6 +83,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TikTok 运营助手 v2.0 Pro")
+        # 设置窗口图标（优先使用打包内 icon.ico）
+        try:
+            from pathlib import Path
+            import sys as _sys
+            base_dir = Path(getattr(_sys, "_MEIPASS", str(config.BASE_DIR)))
+            icon_path = base_dir / "icon.ico"
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+        except Exception:
+            pass
         self._ip_blocked = False
         
         # 允许自由拉伸，设定最小尺寸
@@ -99,6 +114,17 @@ class MainWindow(QMainWindow):
         
         self.show()
 
+        # 预热配置中心（避免首次点击等待过久）
+        QTimer.singleShot(800, self._preload_settings_panel)
+
+    def _preload_settings_panel(self) -> None:
+        """后台预加载配置中心面板，减少首次点击卡顿。"""
+        try:
+            if isinstance(self.settings_panel, LazyLoader):
+                self.settings_panel.ensure_loaded()
+        except Exception:
+            pass
+
     def _check_for_updates(self):
         """Startup update check"""
         self._update_checker = UpdateChecker()
@@ -108,6 +134,7 @@ class MainWindow(QMainWindow):
 
     def _on_update_available(self, version, url, notes):
         """Update found dialog"""
+        self._pending_update_version = version
         msg = QMessageBox(self)
         msg.setWindowTitle("发现新版本")
         msg.setText(f"检测到新版本 v{version}！\n\n更新内容：\n{notes}")
@@ -165,7 +192,11 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 if path:
-                    AutoUpdater.install_and_restart(path)
+                    try:
+                        QMessageBox.information(self, "更新中", "正在更新并重启应用，请稍候...")
+                    except Exception:
+                        pass
+                    AutoUpdater.install_and_restart(path, getattr(self, "_pending_update_version", ""))
                 else:
                     QMessageBox.warning(self, "失败", "更新包路径为空")
         else:
@@ -361,7 +392,8 @@ class MainWindow(QMainWindow):
         
         self.ip_status_label = QLabel("正在初始化...")
         self.ip_status_label.setProperty("variant", "muted")
-        self.statusBar.addWidget(self.ip_status_label)
+        # 使用 permanent widget，避免遮挡 showMessage 区域
+        self.statusBar.addPermanentWidget(self.ip_status_label)
 
     def _set_ip_status_variant(self, is_safe: bool) -> None:
         self.ip_status_label.setProperty("status", "safe" if is_safe else "unsafe")

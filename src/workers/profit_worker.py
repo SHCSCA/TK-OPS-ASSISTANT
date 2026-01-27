@@ -138,6 +138,7 @@ class AIAnalysisWorker(QThread):
     def run(self):
         try:
             from api.deepseek_client import get_deepseek_client
+            import config
             client = get_deepseek_client()
             
             if not client.is_configured():
@@ -145,10 +146,12 @@ class AIAnalysisWorker(QThread):
                 return
 
             # Simulate network delay if needed, or just call
+            role_prompt = (getattr(config, "AI_PROFIT_ROLE_PROMPT", "") or "").strip()
             analysis = client.analyze_product_potential(
-                self.title, 
-                self.price, 
-                self.sales
+                self.title,
+                self.price,
+                self.sales,
+                role_prompt=role_prompt,
             )
             self.finished.emit(self.title, analysis)
         except Exception as e:

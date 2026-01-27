@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QSlider,
     QProgressBar,
+    QGroupBox,
 )
 
 import config
@@ -53,6 +54,7 @@ from workers.video_worker import CyborgComposeWorker
 from utils.ui_log import append_log, install_log_context_menu
 from ui.toast import Toast
 from utils.ai_models_cache import get_provider_models, list_ok_providers
+from ui.role_prompt_dialog import open_role_prompt_dialog
 
 # 供应商显示名映射（用于下拉框）
 _PROVIDER_LABELS = {
@@ -80,12 +82,6 @@ class AIContentFactoryPanel(QWidget):
         self._token_usage = {"prompt": 0, "completion": 0, "total": 0}
         self._photo_images: list[str] = []
         self._photo_image_durations: list[float] = []
-
-        # 自定义角色提示词：轻量防抖，避免频繁写 .env
-        self._role_save_timer = QTimer(self)
-        self._role_save_timer.setSingleShot(True)
-        self._role_save_timer.setInterval(800)
-        self._role_save_timer.timeout.connect(self._persist_custom_role_prompt)
 
         # 字幕样式：轻量防抖写入 .env（拖动 SpinBox 时避免频繁落盘）
         self._subtitle_save_timer = QTimer(self)
@@ -115,10 +111,21 @@ class AIContentFactoryPanel(QWidget):
             self._main_tab_index["narrate"] = self.main_tabs.addTab(self.tab_smart_narrate, "🎙️ 智能解说二创")
 
         # ----------- [Tab B] 半人马拼接 -----------
-        if self._enable_cyborg:
+        if self._enable_cyborg and (not self._photo_only):
             self.tab_cyborg = QWidget()
             self._init_cyborg_ui(self.tab_cyborg)
             self._main_tab_index["cyborg"] = self.main_tabs.addTab(self.tab_cyborg, "🐴 半人马拼接")
+
+        # 仅图转视频时隐藏顶部大 Tab 导航
+        if self._photo_only:
+            try:
+                self.main_tabs.tabBar().hide()
+            except Exception:
+                pass
+            try:
+                self._prune_to_photo_only()
+            except Exception:
+                pass
 
         self.setLayout(layout)
         try:
@@ -205,16 +212,26 @@ class AIContentFactoryPanel(QWidget):
     def _init_smart_narrate_ui(self, parent):
         layout = QVBoxLayout(parent)
         
-        title = QLabel("智能解说二创")
-        title.setObjectName("h1")
-        layout.addWidget(title)
+        if self._photo_only:
+             # 图转视频独立模式：只显示对应标题
+            title = QLabel("图转视频")
+            title.setObjectName("h1")
+            layout.addWidget(title)
 
-        desc = QLabel(
-            "用途：给一段商品/视频描述 + 原始视频，自动生成解说脚本并合成配音，输出‘伪原创’解说视频。\n"
-            "提示：请先在【系统设置】配置 AI_MODEL 与 TTS；首次运行可能较慢（需要合成语音/渲染视频）。"
-        )
-        desc.setProperty("variant", "muted")
-        layout.addWidget(desc)
+            desc = QLabel("用途：上传多张图片，自动生成带解说的短视频。")
+            desc.setProperty("variant", "muted")
+            layout.addWidget(desc)
+        else:
+            title = QLabel("智能解说二创")
+            title.setObjectName("h1")
+            layout.addWidget(title)
+
+            desc = QLabel(
+                "用途：给一段商品/视频描述 + 原始视频，自动生成解说脚本并合成配音，输出‘伪原创’解说视频。\n"
+                "提示：请先在【系统设置】配置 AI_MODEL 与 TTS；首次运行可能较慢（需要合成语音/渲染视频）。"
+            )
+            desc.setProperty("variant", "muted")
+            layout.addWidget(desc)
 
         # Inner Tabs for smart narrate steps
         self.tabs = QTabWidget() 
@@ -226,10 +243,21 @@ class AIContentFactoryPanel(QWidget):
         # -------------------------------------------------------------
         
         # ===================== Tab 1: 基础信息 =====================
+        from PyQt5.QtWidgets import QScrollArea
         base_tab = QWidget()
         base_layout = QVBoxLayout(base_tab)
         base_layout.setContentsMargins(0, 0, 0, 0)
-        base_layout.setSpacing(12)
+
+        # 添加滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(4, 4, 16, 4)
+        scroll_layout.setSpacing(12)
 
         basic_frame = QFrame()
         basic_frame.setProperty("class", "card") # Updated to card
@@ -268,17 +296,6 @@ class AIContentFactoryPanel(QWidget):
         basic_form.addLayout(out_row)
 
         opts_row = QHBoxLayout()
-        opts_row.addWidget(QLabel("AI 角色："))
-        self.role_combo = QComboBox()
-        self.role_combo.addItems([
-            "默认（使用系统设置）",
-            "TK带货主播",
-            "专业测评博主",
-            "幽默搞笑旁白",
-            "情绪共鸣治愈",
-        ])
-        opts_row.addWidget(self.role_combo)
-
         opts_row.addWidget(QLabel("二创供应商："))
         self.factory_provider_combo = QComboBox()
         self.factory_provider_combo.addItem("默认（系统设置）", "")
@@ -303,40 +320,83 @@ class AIContentFactoryPanel(QWidget):
         self.skip_tts_checkbox.setChecked(True)
         opts_row.addWidget(self.skip_tts_checkbox)
         opts_row.addStretch(1)
-        basic_form.addLayout(opts_row)
 
-        role_frame = QFrame()
-        role_frame.setProperty("class", "config-frame")
-        role_form = QVBoxLayout(role_frame)
-        role_title = QLabel("角色与风格")
-        role_title.setObjectName("h2")
-        role_form.addWidget(role_title)
+        # 高级设置折叠区 (不再使用 QGroupBox)
+        self.adv_btn = QPushButton("⬇️  展开高级设置 (API模型、容错配置)")
+        self.adv_btn.setCursor(Qt.PointingHandCursor)
+        self.adv_btn.setCheckable(True)
+        self.adv_btn.setChecked(False)
+        self.adv_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left; 
+                padding: 10px; 
+                font-weight: bold;
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:checked {
+                background-color: #e9ecef;
+                border-bottom-left-radius: 0;
+                border-bottom-right-radius: 0;
+                border-bottom: 1px dashed #ced4da;
+            }
+        """)
 
-        role_form.addWidget(QLabel("自定义角色提示词（可选，留空则使用预设/系统设置）："))
-        self.role_input = QTextEdit()
-        self.role_input.setPlaceholderText(
-            "例：你是一名强转化的 TikTok 带货主播，台词要短句、强 CTA、节奏快。"
-        )
-        self.role_input.setMinimumHeight(160)
-        try:
-            self.role_input.setText((getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or ""))
-        except Exception:
-            pass
-        try:
-            self.role_input.textChanged.connect(self._schedule_persist_custom_role_prompt)
-        except Exception:
-            pass
-        role_form.addWidget(self.role_input)
+        self.adv_container = QWidget()
+        self.adv_container.setObjectName("AdvSettingsContainer_Base")
+        self.adv_container.setStyleSheet("""
+            #AdvSettingsContainer_Base {
+                background-color: #fcfcfc;
+                border: 1px solid #dee2e6;
+                border-top: none;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+            }
+        """)
+        
+        self.adv_layout = QVBoxLayout(self.adv_container)
+        self.adv_layout.setContentsMargins(20, 20, 20, 20)
+        self.adv_layout.setSpacing(15)
+        self.adv_layout.addLayout(opts_row) # 原有的 opts_row 放入此处
+        
+        # 默认隐藏
+        self.adv_container.setVisible(False)
+        
+        def _toggle_base_adv_settings(checked):
+            self.adv_container.setVisible(checked)
+            arrow = "⬆️" if checked else "⬇️"
+            self.adv_btn.setText(f"{arrow}  {'收起' if checked else '展开'}高级设置 (API模型、容错配置)")
+        
+        self.adv_btn.toggled.connect(_toggle_base_adv_settings)
+        
+        basic_form.addWidget(self.adv_btn)
+        basic_form.addWidget(self.adv_container)
 
-        base_layout.addWidget(basic_frame)
-        base_layout.addWidget(role_frame)
-        base_layout.addStretch(1)
+        scroll_layout.addWidget(basic_frame)
+        scroll_layout.addStretch(1)
+        
+        scroll_area.setWidget(scroll_content)
+        base_layout.addWidget(scroll_area)
 
         # ===================== Tab 2: 脚本生成 =====================
         script_tab = QWidget()
         script_layout = QVBoxLayout(script_tab)
         script_layout.setContentsMargins(0, 0, 0, 0)
-        script_layout.setSpacing(12)
+        
+        script_scroll = QScrollArea()
+        script_scroll.setWidgetResizable(True)
+        script_scroll.setFrameShape(QFrame.NoFrame)
+        script_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        script_content = QWidget()
+        script_content_layout = QVBoxLayout(script_content)
+        script_content_layout.setContentsMargins(4, 4, 16, 4)
+        script_content_layout.setSpacing(12)
 
         step1_frame = QFrame()
         step1_frame.setProperty("class", "config-frame")
@@ -373,6 +433,52 @@ class AIContentFactoryPanel(QWidget):
         mode_row.addWidget(self.timeline_duration_spin)
         mode_row.addStretch(1)
         step1_form.addLayout(mode_row)
+
+        try:
+            self.persona_combo.currentIndexChanged.connect(self._update_role_preview)
+        except Exception:
+            pass
+        try:
+            self.role_combo.currentIndexChanged.connect(self._update_role_preview)
+        except Exception:
+            pass
+
+        # 脚本生成角色提示词（可见 + 可配置）
+        script_role_frame = QFrame()
+        script_role_frame.setProperty("class", "config-frame")
+        script_role_layout = QVBoxLayout(script_role_frame)
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("预设角色："))
+        self.role_combo = QComboBox()
+        self.role_combo.addItems([
+            "默认（不注入）",
+            "TK带货主播",
+            "专业测评博主",
+            "幽默搞笑旁白",
+            "情绪共鸣治愈",
+        ])
+        preset_row.addWidget(self.role_combo)
+        preset_row.addStretch(1)
+        script_role_layout.addLayout(preset_row)
+        script_role_row = QHBoxLayout()
+        script_role_row.addWidget(QLabel("脚本生成角色提示词："))
+        script_role_btn = QPushButton("🎭 配置角色")
+        script_role_btn.setFixedSize(120, 35)
+        # script_role_btn.setMinimumWidth(120) -> Replaced
+        # script_role_btn.setFixedHeight(32) -> Replaced
+        script_role_btn.clicked.connect(self._open_factory_role_prompt_dialog)
+        script_role_row.addStretch(1)
+        script_role_row.addWidget(script_role_btn)
+        script_role_layout.addLayout(script_role_row)
+        self.script_role_preview = QTextEdit()
+        self.script_role_preview.setReadOnly(True)
+        self.script_role_preview.setMinimumHeight(90)
+        self.script_role_preview.setPlaceholderText("将显示当前脚本生成实际使用的角色提示词。")
+        script_role_layout.addWidget(self.script_role_preview)
+        self.persona_hint_label = QLabel("")
+        self.persona_hint_label.setProperty("variant", "muted")
+        script_role_layout.addWidget(self.persona_hint_label)
+        step1_form.addWidget(script_role_frame)
 
         self.script_status_label = QLabel("状态：未生成")
         self.script_status_label.setProperty("variant", "muted")
@@ -431,14 +537,26 @@ class AIContentFactoryPanel(QWidget):
         script_btn_row.addStretch(1)
         step1_form.addLayout(script_btn_row)
 
-        script_layout.addWidget(step1_frame)
-        script_layout.addStretch(1)
+        script_content_layout.addWidget(step1_frame)
+        script_content_layout.addStretch(1)
+        
+        script_scroll.setWidget(script_content)
+        script_layout.addWidget(script_scroll)
 
         # ===================== Tab 3: 合成输出 =====================
         compose_tab = QWidget()
         compose_layout = QVBoxLayout(compose_tab)
         compose_layout.setContentsMargins(0, 0, 0, 0)
-        compose_layout.setSpacing(12)
+        
+        compose_scroll = QScrollArea()
+        compose_scroll.setWidgetResizable(True)
+        compose_scroll.setFrameShape(QFrame.NoFrame)
+        compose_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        compose_content = QWidget()
+        compose_content_layout = QVBoxLayout(compose_content)
+        compose_content_layout.setContentsMargins(4, 4, 16, 4)
+        compose_content_layout.setSpacing(12)
 
         step2_frame = QFrame()
         step2_frame.setProperty("class", "config-frame")
@@ -601,16 +719,30 @@ class AIContentFactoryPanel(QWidget):
         btn_row.addStretch(1)
         step2_form.addLayout(btn_row)
 
-        compose_layout.addWidget(subtitle_frame)
+        compose_content_layout.addWidget(subtitle_frame)
 
-        compose_layout.addWidget(step2_frame)
-        compose_layout.addStretch(1)
+        compose_content_layout.addWidget(step2_frame)
+        compose_content_layout.addStretch(1)
+        
+        compose_scroll.setWidget(compose_content)
+        compose_layout.addWidget(compose_scroll)
 
         # ===================== Tab 4: 图转视频 =====================
+        from PyQt5.QtWidgets import QScrollArea
         photo_tab = QWidget()
         photo_layout = QVBoxLayout(photo_tab)
         photo_layout.setContentsMargins(0, 0, 0, 0)
-        photo_layout.setSpacing(12)
+        
+        # 添加滚动区域，避免内容过多时被截断
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(4, 4, 16, 4) # 右侧留出滚动条空间
+        scroll_layout.setSpacing(12)
 
         photo_frame = QFrame()
         photo_frame.setProperty("class", "config-frame")
@@ -693,7 +825,6 @@ class AIContentFactoryPanel(QWidget):
         bgm_pick = QPushButton("选择音频")
         bgm_pick.clicked.connect(self._pick_photo_bgm)
         bgm_row.addWidget(bgm_pick)
-        photo_form.addLayout(bgm_row)
 
         dur_row = QHBoxLayout()
         dur_row.addWidget(QLabel("视频总时长(秒)："))
@@ -725,7 +856,87 @@ class AIContentFactoryPanel(QWidget):
             pass
         self._refresh_photo_models()
         photo_ai_row.addStretch(1)
-        photo_form.addLayout(photo_ai_row)
+
+        # 高级设置折叠区
+        self.photo_adv_btn = QPushButton("⬇️  展开高级设置 (背景音乐、供应商配置)")
+        self.photo_adv_btn.setCursor(Qt.PointingHandCursor)
+        self.photo_adv_btn.setCheckable(True)
+        self.photo_adv_btn.setChecked(False)
+        self.photo_adv_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left; 
+                padding: 10px; 
+                font-weight: bold;
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:checked {
+                background-color: #e9ecef;
+                border-bottom-left-radius: 0;
+                border-bottom-right-radius: 0;
+                border-bottom: 1px dashed #ced4da;
+            }
+        """)
+        
+        self.photo_adv_container = QWidget()
+        self.photo_adv_container.setObjectName("AdvSettingsContainer")
+        # 容器样式：底色略深，带边框，与上方按钮连接
+        self.photo_adv_container.setStyleSheet("""
+            #AdvSettingsContainer {
+                background-color: #fcfcfc;
+                border: 1px solid #dee2e6;
+                border-top: none;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+            }
+        """)
+        
+        self.photo_adv_layout = QVBoxLayout(self.photo_adv_container)
+        self.photo_adv_layout.setContentsMargins(20, 20, 20, 20)
+        self.photo_adv_layout.setSpacing(15)
+        
+        self.photo_adv_layout.addLayout(bgm_row)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("color: #eaeaea;")
+        self.photo_adv_layout.addWidget(line)
+        self.photo_adv_layout.addLayout(photo_ai_row)
+        
+        # 默认隐藏
+        self.photo_adv_container.setVisible(False)
+        
+        def _toggle_adv_settings(checked):
+            self.photo_adv_container.setVisible(checked)
+            arrow = "⬆️" if checked else "⬇️"
+            self.photo_adv_btn.setText(f"{arrow}  {'收起' if checked else '展开'}高级设置 (背景音乐、供应商配置)")
+            
+        self.photo_adv_btn.toggled.connect(_toggle_adv_settings)
+        
+        photo_form.addWidget(self.photo_adv_btn)
+        photo_form.addWidget(self.photo_adv_container)
+
+        # 图转视频角色提示词（可见 + 可配置）
+        photo_role_row = QHBoxLayout()
+        photo_role_row.addWidget(QLabel("图转视频角色提示词："))
+        photo_role_btn = QPushButton("🎭 配置角色")
+        photo_role_btn.setFixedSize(120, 35)
+        # photo_role_btn.setMinimumWidth(120) -> Replaced by setFixedSize
+        # photo_role_btn.setFixedHeight(32) -> Replaced by setFixedSize
+        photo_role_btn.clicked.connect(self._open_photo_role_prompt_dialog)
+        photo_role_row.addStretch(1)
+        photo_role_row.addWidget(photo_role_btn)
+        photo_form.addLayout(photo_role_row)
+        self.photo_role_preview = QTextEdit()
+        self.photo_role_preview.setReadOnly(True)
+        self.photo_role_preview.setMinimumHeight(90)
+        self.photo_role_preview.setPlaceholderText("将显示当前图转视频实际使用的角色提示词。")
+        photo_form.addWidget(self.photo_role_preview)
 
 
         # 预览播放相关控件
@@ -777,8 +988,11 @@ class AIContentFactoryPanel(QWidget):
         photo_btn_row.addStretch(1)
         photo_form.addLayout(photo_btn_row)
 
-        photo_layout.addWidget(photo_frame)
-        photo_layout.addStretch(1)
+        scroll_layout.addWidget(photo_frame)
+        scroll_layout.addStretch(1)
+        
+        scroll_area.setWidget(scroll_content)
+        photo_layout.addWidget(scroll_area)
 
         # 初始化播放器
         self.photo_media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
@@ -805,6 +1019,25 @@ class AIContentFactoryPanel(QWidget):
         self.token_cost_label.setProperty("variant", "muted")
         log_form.addWidget(self.token_cost_label)
 
+        log_toolbar = QHBoxLayout()
+        btn_copy_log = QPushButton("复制日志")
+        btn_copy_log.setProperty("class", "toolbar-btn")
+        btn_copy_log.clicked.connect(self._copy_log)
+        log_toolbar.addWidget(btn_copy_log)
+
+        btn_clear_log = QPushButton("清空日志")
+        btn_clear_log.setProperty("class", "toolbar-btn")
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_toolbar.addWidget(btn_clear_log)
+
+        btn_open_out = QPushButton("打开输出目录")
+        btn_open_out.setProperty("class", "toolbar-btn")
+        btn_open_out.clicked.connect(self._open_output_dir)
+        log_toolbar.addWidget(btn_open_out)
+
+        log_toolbar.addStretch(1)
+        log_form.addLayout(log_toolbar)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("LogView")
@@ -821,11 +1054,16 @@ class AIContentFactoryPanel(QWidget):
             self._tab_index["script"] = self.tabs.addTab(script_tab, "② 脚本生成")
             self._tab_index["compose"] = self.tabs.addTab(compose_tab, "③ 合成输出")
         if self._enable_photo:
-            self._tab_index["photo"] = self.tabs.addTab(photo_tab, "④ 图转视频")
+            title = "图转视频" if self._photo_only else "④ 图转视频"
+            self._tab_index["photo"] = self.tabs.addTab(photo_tab, title)
         self._tab_index["log"] = self.tabs.addTab(log_tab, "运行日志")
 
         # layout.addWidget(self.tabs, 1) -> Moved to top
         # self.setLayout(layout) -> Handled by parent wrapper
+        try:
+            self._update_role_preview()
+        except Exception:
+            pass
 
     def _init_cyborg_ui(self, parent):
         """Initialize Cyborg Splicing Tab"""
@@ -970,6 +1208,21 @@ class AIContentFactoryPanel(QWidget):
         except Exception:
             pass
 
+    def _prune_to_photo_only(self) -> None:
+        """仅保留图转视频子页面。"""
+        try:
+            if not hasattr(self, "tabs") or not hasattr(self, "_tab_index"):
+                return
+            
+            photo_idx = self._tab_index.get("photo")
+            if photo_idx is not None:
+                self.tabs.setCurrentIndex(photo_idx)
+                
+            # 注：_init_smart_narrate_ui 已根据 FLAG 仅加载了 Photo 和 Log Tab
+            # 故此处无需再执行 removeTab 操作，且保留 tabBar 以便查看日志
+        except Exception:
+            pass
+
     def _on_cyborg_error(self, err_msg: str):
         self.cyborg_start_btn.setEnabled(True)
         self.cyborg_worker = None
@@ -1095,6 +1348,7 @@ class AIContentFactoryPanel(QWidget):
             is_timeline = self.script_mode_combo.currentIndex() == 1
             self.timeline_duration_spin.setEnabled(is_timeline)
             self.timeline_table.setVisible(is_timeline)
+            self._update_role_preview()
         except Exception:
             pass
 
@@ -1194,18 +1448,158 @@ class AIContentFactoryPanel(QWidget):
             pass
 
     def _schedule_persist_custom_role_prompt(self) -> None:
+        # 已改为弹窗保存，不再使用输入框防抖保存
+        return
+
+    def _open_factory_role_prompt_dialog(self) -> None:
+        """配置二创工厂角色提示词（持久化到 .env）。"""
+        current = (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
+        text = open_role_prompt_dialog(
+            self,
+            title="AI 二创工厂角色提示词",
+            initial_text=current,
+            help_text="将作为系统提示词注入二创脚本生成，影响内容风格与结构。",
+        )
+        if text is None:
+            return
         try:
-            self._role_save_timer.start()
+            config.set_config("AI_FACTORY_ROLE_PROMPT", text, persist=True, hot_reload=False)
+            self._update_role_preview()
+        except Exception:
+            pass
+
+    def _open_photo_role_prompt_dialog(self) -> None:
+        """配置图转视频角色提示词（持久化到 .env）。"""
+        current = (getattr(config, "AI_PHOTO_ROLE_PROMPT", "") or "").strip()
+        text = open_role_prompt_dialog(
+            self,
+            title="图转视频角色提示词",
+            initial_text=current,
+            help_text="将作为系统提示词注入图转视频脚本与画面风格，影响内容风格与结构。",
+        )
+        if text is None:
+            return
+        try:
+            config.set_config("AI_PHOTO_ROLE_PROMPT", text, persist=True, hot_reload=False)
+            self._update_role_preview()
+        except Exception:
+            pass
+
+    def _effective_factory_role_prompt(self, default_text: str = "") -> str:
+        """二创工厂：获取当前生效的角色提示词（含默认角色）。"""
+        # 1) 自定义（已保存）优先
+        custom = (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
+        if custom:
+            return custom
+
+        # 2) 预设角色
+        preset = (self._preset_role_text() or "").strip()
+        if preset:
+            return preset
+
+        # 3) 系统设置
+        system_saved = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        if system_saved:
+            return system_saved
+
+        # 4) 人设（脚本页专用，且无角色提示词时才生效）
+        try:
+            persona_key = (self.persona_combo.currentData() or "").strip()
+        except Exception:
+            persona_key = ""
+        if persona_key:
+            try:
+                persona_prompt = (getattr(config, "PERSONA_LIBRARY", {}) or {}).get(persona_key, "")
+            except Exception:
+                persona_prompt = ""
+            if persona_prompt:
+                return persona_prompt
+
+        if default_text:
+            return default_text
+        return "未配置角色提示词（使用内置默认角色约束）。"
+
+    def _effective_photo_role_prompt(self, default_text: str = "") -> str:
+        """图转视频：获取当前生效的角色提示词（含默认角色）。"""
+        custom = (getattr(config, "AI_PHOTO_ROLE_PROMPT", "") or "").strip()
+        if custom:
+            return custom
+
+        system_saved = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        if system_saved:
+            return system_saved
+
+        if default_text:
+            return default_text
+        return "未配置角色提示词（使用内置默认角色约束）。"
+
+    def _update_role_preview(self) -> None:
+        """刷新多个页面上的角色提示词预览。"""
+        custom = (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
+        preset = (self._preset_role_text() or "").strip()
+        system_saved = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        has_role_override = bool(custom or preset or system_saved)
+
+        base_default = (
+            "You are a TikTok script writer. Keep output concise and natural. "
+            "Follow role/style constraints if provided."
+        )
+        script_default = (
+            "You are a TikTok short-form script writer. "
+            "Follow role/style constraints if provided. "
+            "Use short sentences, slang, and rhetorical questions. "
+            "Avoid phrases like 'Here is a product'. "
+            "Output plain text only."
+        )
+        timeline_default = (
+            "You are a TikTok short-form script writer. "
+            "Output STRICT JSON only. No markdown. No extra keys."
+        )
+
+        try:
+            is_timeline = self.script_mode_combo.currentIndex() == 1
+        except Exception:
+            is_timeline = False
+
+        base_text = self._effective_factory_role_prompt(default_text=base_default)
+        script_text = self._effective_factory_role_prompt(
+            default_text=timeline_default if is_timeline else script_default
+        )
+        photo_text = self._effective_photo_role_prompt(default_text=timeline_default)
+        try:
+            if hasattr(self, "role_preview"):
+                self.role_preview.setPlainText(base_text)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "script_role_preview"):
+                self.script_role_preview.setPlainText(script_text)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "photo_role_preview"):
+                self.photo_role_preview.setPlainText(photo_text)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "persona_hint_label"):
+                try:
+                    persona_key = (self.persona_combo.currentData() or "").strip()
+                except Exception:
+                    persona_key = ""
+                if not persona_key:
+                    self.persona_hint_label.setText("人设：未选择")
+                elif has_role_override:
+                    self.persona_hint_label.setText("人设已被角色提示词/系统提示词覆盖（将不注入人设）。")
+                else:
+                    self.persona_hint_label.setText("人设将生效（仅在未配置角色提示词时注入）。")
         except Exception:
             pass
 
     def _persist_custom_role_prompt(self) -> None:
-        try:
-            text = (self.role_input.toPlainText() if hasattr(self, "role_input") else "")
-            text = (text or "").strip()
-            config.set_config("AI_FACTORY_ROLE_PROMPT", text, persist=True, hot_reload=False)
-        except Exception:
-            pass
+        # 已改为弹窗保存，不再使用输入框持久化
+        return
 
     def _schedule_persist_subtitle_style(self) -> None:
         try:
@@ -1400,7 +1794,9 @@ class AIContentFactoryPanel(QWidget):
 
         self.start_btn.setEnabled(False)
 
-        role_prompt = self._role_prompt_from_ui()
+        role_prompt = (getattr(config, "AI_PHOTO_ROLE_PROMPT", "") or "").strip()
+        if not role_prompt:
+            role_prompt = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
         persona_key = ""
         try:
             persona_key = str(self.persona_combo.currentData() or "").strip()
@@ -1465,11 +1861,7 @@ class AIContentFactoryPanel(QWidget):
 
         role_prompt = self._role_prompt_from_ui()
 
-        persona_key = ""
-        try:
-            persona_key = str(self.persona_combo.currentData() or "").strip()
-        except Exception:
-            persona_key = ""
+        persona_key = self._resolve_persona_key_for_script()
 
         is_timeline = False
         try:
@@ -1609,18 +2001,18 @@ class AIContentFactoryPanel(QWidget):
         self._switch_to_tab("script")
 
     def _role_prompt_from_ui(self) -> str:
-        # 1) 自定义优先
-        try:
-            custom = (self.role_input.toPlainText() if hasattr(self, "role_input") else "").strip()
-        except RuntimeError:
-            custom = ""
+        # 1) 自定义（已保存）优先
+        custom = (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
         if custom:
             return custom
 
         # 2) 预设角色
+        return self._preset_role_text()
+
+    def _preset_role_text(self) -> str:
         try:
             text = (self.role_combo.currentText() or "").strip()
-        except RuntimeError:
+        except Exception:
             text = ""
         if not text or text.startswith("默认"):
             return ""
@@ -1631,6 +2023,22 @@ class AIContentFactoryPanel(QWidget):
             "情绪共鸣治愈": "You are an empathetic storyteller. Create emotional resonance and comforting tone.",
         }
         return mapping.get(text, "")
+
+    def _resolve_persona_key_for_script(self) -> str:
+        """根据冲突规则决定是否注入人设。"""
+        try:
+            persona_key = str(self.persona_combo.currentData() or "").strip()
+        except Exception:
+            persona_key = ""
+        if not persona_key:
+            return ""
+
+        custom = (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
+        preset = (self._preset_role_text() or "").strip()
+        system_saved = (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
+        if custom or preset or system_saved:
+            return ""
+        return persona_key
 
     def _on_done(self, output_path: str, error_msg: str) -> None:
         if error_msg:
@@ -1846,7 +2254,68 @@ class AIContentFactoryPanel(QWidget):
             self._append(message or "图转视频完成")
         else:
             self._append(message or "图转视频失败", level="ERROR")
+            # 若 message 中包含 debug=PATH，弹窗提示用户查看调试响应文件或输出目录
+            try:
+                msg = (message or "")
+                if "debug=" in msg:
+                    # 提取 debug 路径
+                    parts = msg.split("debug=", 1)
+                    debug_path = parts[1].strip()
+                    # 清理可能的引号
+                    debug_path = debug_path.strip('"\'')
+                    from pathlib import Path
+                    p = Path(debug_path)
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("云端生成未返回视频链接")
+                    dlg.setText(
+                        "云端任务完成但未返回视频链接。已保存完整响应以便排查。\n请选择操作："
+                    )
+                    open_resp = dlg.addButton("打开响应文件", QMessageBox.ActionRole)
+                    open_folder = dlg.addButton("打开输出目录", QMessageBox.ActionRole)
+                    dlg.addButton(QMessageBox.Close)
+                    dlg.exec_()
+                    btn = dlg.clickedButton()
+                    if btn == open_resp:
+                        try:
+                            os.startfile(str(p))
+                        except Exception:
+                            QMessageBox.warning(self, "打开失败", f"无法打开文件: {p}")
+                    elif btn == open_folder:
+                        try:
+                            os.startfile(str(p.parent))
+                        except Exception:
+                            QMessageBox.warning(self, "打开失败", f"无法打开目录: {p.parent}")
+            except Exception:
+                pass
         self.photo_worker = None
+
+    def _copy_log(self) -> None:
+        try:
+            text = (self.log_view.toPlainText() or "").strip()
+            if not text:
+                Toast.show_info(self, "日志为空")
+                return
+            from PyQt5.QtWidgets import QApplication
+            QApplication.clipboard().setText(text)
+            Toast.show_success(self, "已复制日志")
+        except Exception:
+            pass
+
+    def _clear_log(self) -> None:
+        try:
+            self.log_view.clear()
+        except Exception:
+            pass
+
+    def _open_output_dir(self) -> None:
+        try:
+            base = (self.output_dir_input.text() or "").strip()
+            if not base:
+                base = str(getattr(config, "OUTPUT_DIR", "Output"))
+            import os
+            os.startfile(base)
+        except Exception:
+            pass
 
     def shutdown(self) -> None:
         try:

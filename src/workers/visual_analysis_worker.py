@@ -30,6 +30,7 @@ class VisualAnalysisWorker(BaseWorker):
         prompt: str = "",
         model: str = "",
         provider: str = "",
+        role_prompt: str = "",
     ) -> None:
         super().__init__()
         self.video_path = (video_path or "").strip()
@@ -37,6 +38,7 @@ class VisualAnalysisWorker(BaseWorker):
         self.prompt = (prompt or "").strip()
         self.model = (model or "").strip()
         self.provider = (provider or "").strip()
+        self.role_prompt = (role_prompt or "").strip()
 
     def _run_impl(self) -> None:
         if not self.video_path:
@@ -56,7 +58,7 @@ class VisualAnalysisWorker(BaseWorker):
                 return
 
             self.emit_log(f"🧠 已抽帧 {len(frames)} 张，开始视觉分析...")
-            assistant = VisualAIAssistant(model=self.model, provider=self.provider)
+            assistant = VisualAIAssistant(model=self.model, provider=self.provider, role_prompt=self.role_prompt)
             result_text = assistant.analyze_frames(frames, self.prompt)
             if not result_text:
                 self.emit_finished(False, "视觉模型未返回有效内容")
