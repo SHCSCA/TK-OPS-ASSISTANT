@@ -34,30 +34,65 @@ def _ensure_update_logger() -> None:
         pass
 
 
+def _normalize_update_url(provider: str, check_url: str) -> str:
+    """规范化更新地址（避免 provider 与 URL 不匹配）。"""
+    try:
+        provider = (provider or "").strip().lower()
+        check_url = (check_url or "").strip()
+        if provider == "gitee" and "api.github.com" in check_url:
+            parts = check_url.split("/repos/")
+            if len(parts) > 1:
+                repo_path = parts[1]
+                return f"https://gitee.com/api/v5/repos/{repo_path}"
+        return check_url
+    except Exception:
+        return check_url
+
+
 def _parse_github_release(data: dict) -> tuple[str, str, str]:
-    remote_ver_str = data.get("tag_name", "0.0.0").lstrip("v")
+    remote_ver_str = data.get("tag_name", "0.0.0").lstrip("vV")
     download_url = ""
     assets = data.get("assets", [])
-    for asset in assets:
-        name = (asset.get("name", "") or "").lower()
-        # 接受 exe / zip / tar.gz
-        if name.endswith(".exe") or name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz"):
-            download_url = asset.get("browser_download_url", "")
+    
+    # 优先级：exe > zip > tar.gz
+    priorities = [".exe", ".zip", ".tar.gz", ".tgz"]
+    
+    for suffix in priorities:
+        for asset in assets:
+            name = (asset.get("name", "") or "").lower()
+            if name.endswith(suffix):
+                download_url = asset.get("browser_download_url", "")
+                if download_url:
+                    break
+        if download_url:
             break
+
+    if not download_url:
+        download_url = data.get("zipball_url", "") or data.get("tarball_url", "")
     body = data.get("body", "No release notes.")
     return remote_ver_str, download_url, body
 
 
 def _parse_gitee_release(data: dict) -> tuple[str, str, str]:
-    remote_ver_str = data.get("tag_name", "0.0.0").lstrip("v")
+    remote_ver_str = data.get("tag_name", "0.0.0").lstrip("vV")
     download_url = ""
     assets = data.get("assets", [])
-    for asset in assets:
-        name = (asset.get("name", "") or "").lower()
-        # 接受 exe / zip / tar.gz
-        if name.endswith(".exe") or name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz"):
-            download_url = asset.get("browser_download_url", "") or asset.get("url", "")
+    
+    # 优先级：exe > zip > tar.gz
+    priorities = [".exe", ".zip", ".tar.gz", ".tgz"]
+    
+    for suffix in priorities:
+        for asset in assets:
+            name = (asset.get("name", "") or "").lower()
+            if name.endswith(suffix):
+                download_url = asset.get("browser_download_url", "") or asset.get("url", "")
+                if download_url:
+                    break
+        if download_url:
             break
+
+    if not download_url:
+        download_url = data.get("zipball_url", "") or data.get("tarball_url", "")
     body = data.get("body", "No release notes.")
     return remote_ver_str, download_url, body
 
@@ -71,7 +106,10 @@ class UpdateChecker(QThread):
     def __init__(self, manual=False):
         super().__init__()
         self.manual = manual
-        self.check_url = config.UPDATE_CHECK_URL
+        self.check_url = _normalize_update_url(
+            getattr(config, "UPDATE_PROVIDER", "github"),
+            config.UPDATE_CHECK_URL,
+        )
 
     def run(self):
         try:
@@ -84,7 +122,7 @@ class UpdateChecker(QThread):
             # 1. Fetch Release Info
             # GitHub Release API structure assumption
             headers = {
-                "User-Agent": "TK-Ops-Assistant-Updater",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/vnd.github+json",
             }
             
@@ -170,6 +208,14 @@ class UpdateChecker(QThread):
                 return
 
             data = resp.json()
+            # 部分 API 仅提供 assets_url，需二次拉取资产列表
+            try:
+                if isinstance(data, dict) and not data.get("assets") and data.get("assets_url"):
+                    assets_resp = requests.get(data.get("assets_url"), headers=headers, timeout=10)
+                    if assets_resp.status_code == 200:
+                        data["assets"] = assets_resp.json()
+            except Exception as e:
+                logger.warning(f"assets_url 拉取失败：{e}")
             if provider == "gitee":
                 remote_ver_str, download_url, body = _parse_gitee_release(data)
             else:
@@ -222,46 +268,85 @@ class UpdateDownloader(QThread):
         super().__init__()
         self.url = url
 
-    def run(self):
-        try:
-            _ensure_update_logger()
-            temp_dir = tempfile.gettempdir()
-            fname = self.url.split("/")[-1]
-            # Handle query params if any
-            if "?" in fname:
-                fname = fname.split("?")[0]
-            if not fname:
-                fname = "update_package.tmp"
-                
-            local_path = os.path.join(temp_dir, fname)
-            part_path = local_path + ".part"
-            downloaded = 0
-            if os.path.exists(part_path):
-                try:
-                    downloaded = os.path.getsize(part_path)
-                except Exception:
-                    downloaded = 0
-            
-            headers = {"User-Agent": "TK-Ops-Assistant-Updater"}
-            if downloaded > 0:
-                headers["Range"] = f"bytes={downloaded}-"
-                logger.info(f"断点续传：已下载 {downloaded} bytes")
+    def _download_to(self, url: str, local_path: str, part_path: str) -> None:
+        downloaded = 0
+        if os.path.exists(part_path):
+            try:
+                downloaded = os.path.getsize(part_path)
+            except Exception:
+                downloaded = 0
 
-            logger.info(f"开始下载更新：{self.url}")
-            with requests.get(self.url, stream=True, headers=headers, timeout=30) as r:
+        # Mismatched User-Agent can cause Gitee to return error pages
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/octet-stream,application/zip,application/gzip,application/x-zip-compressed,application/x-tar,*/*",
+            "Connection": "keep-alive",
+        }
+        
+        # Add Referer for Gitee to prevent hotlink protection issues
+        if "gitee.com" in url:
+            try:
+                # https://gitee.com/owner/repo/...
+                parts = url.split("gitee.com/")
+                if len(parts) > 1:
+                    repo_part = "/".join(parts[1].split("/")[:2])
+                    headers["Referer"] = f"https://gitee.com/{repo_part}"
+            except Exception:
+                pass
+
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
+            logger.info(f"断点续传：已下载 {downloaded} bytes")
+
+        logger.info(f"开始下载更新：{url}")
+        
+        session = requests.Session()
+        try:
+            with session.get(url, stream=True, headers=headers, timeout=60, allow_redirects=True) as r:
+                # Mirror 404/502 handling: fallback to original URL (recursion or simple retry logic)
+                # 由于这里是 _download_to，为了简单起见，如果镜像站返回错误，
+                # 我们抛出特定异常，让外层 run 方法捕获并处理回退。
+                if r.status_code >= 400 and "ghproxy" in url:
+                    raise RuntimeError(f"MirrorError: {r.status_code}")
+
                 if r.status_code == 416:
-                    # 已完整下载
-                    os.replace(part_path, local_path)
-                    logger.info(f"更新包已下载：{local_path}")
-                    self.finished.emit(True, local_path)
-                    return
+                    # Range Not Satisfiable - assume finished or invalid range.
+                    # If file exists and seems substantial, assume finished.
+                    if os.path.exists(part_path) and os.path.getsize(part_path) > 1024: 
+                        os.replace(part_path, local_path)
+                        logger.info(f"更新包已下载(416 Resume)：{local_path}")
+                        return
+                    else:
+                         # Invalid range for small file, restart
+                         downloaded = 0
+                         if os.path.exists(part_path):
+                            os.remove(part_path)
+                         if "Range" in headers:
+                             del headers["Range"]
+                         # Retry without range is complex here without recursion or loop, 
+                         # but assume we won't hit this often if logic is correct.
+                         r.raise_for_status() # Raise error to trigger retry if needed logic was here
 
                 r.raise_for_status()
+                
+                # Content-Type check to avoid saving HTML as ZIP
+                ctype = r.headers.get("Content-Type", "").lower()
+                if "text/html" in ctype:
+                    logger.error(f"下载链接返回了 HTML 页面而非文件 (Content-Type: {ctype})。可能需要登录或链接失效。")
+                    # Try to read a bit to log what it is
+                    try:
+                        snippet = r.content[:500].decode('utf-8', errors='ignore')
+                        logger.warning(f"Response snippet: {snippet}")
+                    except:
+                        pass
+                    raise RuntimeError("Server returned HTML instead of binary file")
+
                 total_length = int(r.headers.get('content-length', 0))
                 if "Range" in headers and total_length > 0:
                     total_length = total_length + downloaded
 
-                with open(part_path, 'ab') as f:
+                mode = 'ab' if downloaded > 0 else 'wb'
+                with open(part_path, mode) as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
@@ -272,6 +357,126 @@ class UpdateDownloader(QThread):
 
             os.replace(part_path, local_path)
             logger.info(f"更新包已下载：{local_path}")
+        finally:
+            session.close()
+
+    def run(self):
+        try:
+            _ensure_update_logger()
+            
+            # 针对 GitHub 的国内加速处理
+            # 国内免费仓库（Gitee/GitCode）通常限制单文件 100MB，GitHub 限制 2GB。
+            # 可以在此通过开源加速镜像来实现“像国内仓库一样快”的 GitHub 下载。
+            # 修改：增加镜像可用性检测，如果不通则自动回退到直连。
+            if "github.com" in self.url and "ghproxy" not in self.url:
+                use_mirror = False
+                mirror_host = "mirror.ghproxy.com"
+                mirror_prefix = f"https://{mirror_host}/"
+                
+                # 简单检测镜像是否 DNS 可解析 (防止域名失效导致更新彻底不可用)
+                try:
+                    import socket
+                    socket.gethostbyname(mirror_host)
+                    use_mirror = True
+                except Exception:
+                    logger.warning(f"GitHub 加速镜像 {mirror_host} 无法解析，将回退到直连下载。")
+                    use_mirror = False
+                
+                if use_mirror:
+                     logger.info(f"应用 GitHub 加速: {mirror_host}")
+                     self.url = f"{mirror_prefix}{self.url}"
+
+            temp_dir = tempfile.gettempdir()
+            fname = self.url.split("/")[-1]
+            # Handle query params if any
+            if "?" in fname:
+                fname = fname.split("?")[0]
+            if not fname:
+                fname = "update_package.tmp"
+                
+            local_path = os.path.join(temp_dir, fname)
+            part_path = local_path + ".part"
+
+            try:
+                self._download_to(self.url, local_path, part_path)
+            except (RuntimeError, Exception) as e:
+                err_str = str(e)
+                # 场景1: Gitee 返回 HTML
+                if "HTML" in err_str and "gitee.com" in self.url:
+                    logger.warning("首次下载返回HTML，尝试备用下载策略...")
+                
+                # 场景2: 加速镜像挂了 (DNS Error, HTTP 4xx/5xx, SSL Error, Connection Error)
+                elif ("ghproxy" in self.url) and (
+                    "MirrorError" in err_str or 
+                    "NameResolutionError" in err_str or 
+                    "SSLError" in err_str or 
+                    "ConnectionError" in err_str or
+                    "Max retries exceeded" in err_str
+                ):
+                    logger.warning(f"加速镜像下载失败({type(e).__name__})，回退到 GitHub 直连...")
+                    # 剥离镜像前缀: https://mirror.ghproxy.com/https://github.com/...
+                    # 找到第二个 https://
+                    original_url = self.url
+                    if "https://github.com" in original_url:
+                         original_url = "https://github.com" + original_url.split("https://github.com")[1]
+                         self.url = original_url
+                         self._download_to(self.url, local_path, part_path)
+                         # 如果直连成功，直接跳过下面的重试逻辑
+                         self.finished.emit(True, local_path)
+                         return
+                    else:
+                        raise e
+                else:
+                    raise e
+            
+            # Gitee 专用重试逻辑：如果 zipball_url 返回 HTML，尝试 repository/archive 格式
+            # 原 URL: .../archive/refs/tags/V2.2.2.zip -> 失败 HTML
+            # 新 URL: .../repository/archive/V2.2.2.zip
+            if "gitee.com" in self.url and "archive/refs/tags" in self.url and not zipfile.is_zipfile(local_path):
+                 
+                 logger.warning("Gitee archive/refs/tags 下载失败（可能是 HTML），尝试 repository/archive 格式...")
+                 alt_url = self.url.replace("archive/refs/tags", "repository/archive")
+                 self._download_to(alt_url, local_path, part_path)
+
+
+            # Gitee 归档链接有时返回 HTML，若不是 zip 则尝试追加 download=1 重新下载
+            if local_path.lower().endswith(".zip") and not zipfile.is_zipfile(local_path):
+                logger.warning("下载内容不是 zip，尝试追加 download=1 重新下载")
+                try:
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                except Exception:
+                    pass
+                try:
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+                except Exception:
+                    pass
+
+                retry_url = self.url
+                if "download=1" not in retry_url:
+                    sep = "&" if "?" in retry_url else "?"
+                    retry_url = f"{retry_url}{sep}download=1"
+                self._download_to(retry_url, local_path, part_path)
+
+            # 若仍不是 zip，尝试 tar.gz 兜底
+            if local_path.lower().endswith(".zip") and not zipfile.is_zipfile(local_path):
+                logger.warning("仍不是 zip，尝试使用 tar.gz 下载")
+                tar_url = self.url.replace(".zip", ".tar.gz")
+                tar_name = fname.replace(".zip", ".tar.gz")
+                tar_path = os.path.join(temp_dir, tar_name)
+                tar_part = tar_path + ".part"
+                self._download_to(tar_url, tar_path, tar_part)
+                if not tarfile.is_tarfile(tar_path):
+                    raise RuntimeError("下载包不是有效的 zip/tar.gz")
+                local_path = tar_path
+
+            # 最终校验
+            if local_path.lower().endswith(".zip") and not zipfile.is_zipfile(local_path):
+                raise RuntimeError("下载包不是有效的 zip")
+            if local_path.lower().endswith(".tar.gz") and not tarfile.is_tarfile(local_path):
+                raise RuntimeError("下载包不是有效的 tar.gz")
+
             self.finished.emit(True, local_path)
             
         except Exception as e:
@@ -319,6 +524,7 @@ class AutoUpdater:
                 return False
 
             file_to_swap = installer_path
+            extract_dir = ""  # Initialize empty to avoid UnboundLocalError
             
             # Handle ZIP: Extract and find the EXE
             if installer_path.lower().endswith(".zip"):
@@ -421,6 +627,15 @@ if errorlevel 1 (
 {version_line}
 
 start "" "{current_exe}"
+
+rem Clean up extracted update files if they exist
+set "EXTRACT_DIR={extract_dir}"
+if not "%EXTRACT_DIR%"=="" (
+    if exist "%EXTRACT_DIR%" (
+       rmdir /s /q "%EXTRACT_DIR%"
+    )
+)
+
 del "{installer_path}"
 del "%~f0"
 """

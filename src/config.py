@@ -42,7 +42,7 @@ def _clean_env_value(value: str | None) -> str:
 
 # Auto Update
 UPDATE_PROVIDER = _clean_env_value(os.getenv("UPDATE_PROVIDER", "github")) or "github"
-UPDATE_CHECK_URL = os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest")
+UPDATE_CHECK_URL = _clean_env_value(os.getenv("UPDATE_CHECK_URL", "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest"))
 
 
 def _fallback_data_dir() -> Path:
@@ -77,9 +77,29 @@ def _ensure_dir(path: Path) -> Path:
 
 # 运行目录：源码模式用项目根目录；打包(onefile)模式用 exe 所在目录
 if IS_FROZEN:
-	# 冻结态：代码目录在 exe 附近，但数据目录优先落到可写位置
+	# 冻结态：代码目录在 exe 附近
 	BASE_DIR = Path(sys.executable).resolve().parent
-	DATA_DIR = _ensure_dir(_fallback_data_dir())
+
+	# 【架构优化】智能便携模式 (Smart Portable Mode)
+	# 1. 优先尝试在 EXE 同级目录存储数据（Logs/Output/AssetLibrary），实现“即插即用”。
+	# 2. 如果所在目录不可写（例如安装在 C:\Program Files），自动降级到系统 AppData 目录，防止权限报错。
+	try:
+		# 写入测试
+		test_write_path = BASE_DIR / ".perm_check"
+		test_write_path.write_text("ok", encoding="utf-8")
+		test_write_path.unlink() # 清理测试文件
+		
+		# 测试通过：使用便携模式
+		# 【UI美学优化】为避免在桌面生成过多杂乱文件夹，将 Logs/Output/AssetLibrary 统一收纳到 'tk_data' 目录
+		DATA_DIR = BASE_DIR / "tk_data"
+		try:
+			DATA_DIR.mkdir(exist_ok=True)
+		except Exception:
+			# 极少情况无法创建子目录，回退到根目录
+			DATA_DIR = BASE_DIR
+	except Exception:
+		# 测试失败（无权限）：使用 AppData 模式
+		DATA_DIR = _ensure_dir(_fallback_data_dir())
 else:
 	BASE_DIR = Path(__file__).resolve().parent.parent
 	DATA_DIR = BASE_DIR
@@ -582,7 +602,7 @@ def reload_config() -> None:
 	VOLC_TTS_ENCODING = _clean_env_value(os.getenv("VOLC_TTS_ENCODING", "mp3")) or "mp3"
 
 	LOG_LEVEL = (_clean_env_value(os.getenv("LOG_LEVEL", "INFO")) or "INFO").upper()
-	THEME_MODE = _clean_env_value(os.getenv("THEME_MODE", "dark")) or "dark"
+	THEME_MODE = _clean_env_value(os.getenv("THEME_MODE", "light")) or "light"
 
 	IP_CHECK_ENABLED = (os.getenv("IP_CHECK_ENABLED", "true").lower() == "true")
 	IP_API_URL = _clean_env_value(os.getenv("IP_API_URL", "http://ip-api.com/json")) or "http://ip-api.com/json"
@@ -714,7 +734,7 @@ def sync_env_file() -> None:
 
 	# 仅补齐缺失 key：不覆盖用户已有值
 	defaults: dict[str, str] = {
-		"THEME_MODE": "dark",
+		"THEME_MODE": "light",
 		"LOG_LEVEL": "INFO",
 		"UPDATE_PROVIDER": "github",
 		"UPDATE_CHECK_URL": "https://api.github.com/repos/SHCSCA/TK-OPS-ASSISTANT/releases/latest",

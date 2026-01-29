@@ -16,6 +16,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtCore import QTimer
+from pathlib import Path
+from packaging import version
 import sys
 import config
 from api.ip_detector import check_ip_safety, get_ip_status_color
@@ -106,6 +108,7 @@ class MainWindow(QMainWindow):
         self._run_migrations()
         
         self._init_ui()
+        self._check_update_marker()
         self._check_ip_status()
         self._init_ip_timer()
         
@@ -131,6 +134,52 @@ class MainWindow(QMainWindow):
         self._update_checker.update_available.connect(self._on_update_available)
         self._update_checker.check_finished.connect(self._on_update_check_finished)
         self._update_checker.start()
+
+    def _update_marker_path(self) -> Path:
+        base_dir = getattr(config, "DATA_DIR", config.BASE_DIR)
+        return Path(base_dir) / "UPDATE_PENDING.txt"
+
+    def _write_update_marker(self, version: str) -> None:
+        try:
+            if not version:
+                return
+            self._update_marker_path().write_text(version.strip(), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _check_update_marker(self) -> None:
+        """检查更新是否完成，并给出明确反馈。"""
+        try:
+            marker = self._update_marker_path()
+            if not marker.exists():
+                return
+            target_str = (marker.read_text(encoding="utf-8") or "").strip()
+            if not target_str:
+                marker.unlink(missing_ok=True)
+                return
+            
+            # 使用 version.parse 进行比较，解决 2.2.3 > 2.2.2 仍提示未完成的问题
+            try:
+                local_ver = version.parse(str(getattr(config, "APP_VERSION", "0.0.0")))
+                target_ver = version.parse(target_str)
+                
+                # 如果当前版本 >= 目标版本，视为更新成功（或该 Pending 已过期）
+                if local_ver >= target_ver:
+                    # 仅当完全相等时提示更新成功，若是高于目标版本，可能用户手动装了更新的版本，静默删除标记
+                    if local_ver == target_ver:
+                        QMessageBox.information(self, "更新完成", f"已更新到 v{target_str}。")
+                    marker.unlink(missing_ok=True)
+                    return
+            except Exception:
+                # 兜底：直接字符串比较
+                if str(getattr(config, "APP_VERSION", "")) == target_str:
+                    QMessageBox.information(self, "更新完成", f"已更新到 v{target_str}。")
+                    marker.unlink(missing_ok=True)
+                    return
+
+            QMessageBox.warning(self, "更新未完成", f"检测到待完成更新版本：v{target_str}。\n当前版本：v{config.APP_VERSION}。\n请重新执行更新。")
+        except Exception:
+            pass
 
     def _on_update_available(self, version, url, notes):
         """Update found dialog"""
@@ -192,11 +241,28 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 if path:
+                    self._write_update_marker(getattr(self, "_pending_update_version", ""))
+                    # 安装阶段使用可见进度对话框（无取消），并异步触发安装
                     try:
-                        QMessageBox.information(self, "更新中", "正在更新并重启应用，请稍候...")
+                        self.install_dlg = QProgressDialog("正在安装更新并重启应用...", None, 0, 0, self)
+                        self.install_dlg.setWindowModality(Qt.WindowModal)
+                        self.install_dlg.setMinimumDuration(0)
+                        self.install_dlg.setValue(0)
+                        self.install_dlg.show()
                     except Exception:
-                        pass
-                    AutoUpdater.install_and_restart(path, getattr(self, "_pending_update_version", ""))
+                        self.install_dlg = None
+
+                    def _do_install():
+                        ok = AutoUpdater.install_and_restart(path, getattr(self, "_pending_update_version", ""))
+                        if not ok:
+                            try:
+                                if self.install_dlg:
+                                    self.install_dlg.close()
+                            except Exception:
+                                pass
+                            QMessageBox.warning(self, "更新失败", "安装更新失败，请检查更新日志。")
+
+                    QTimer.singleShot(100, _do_install)
                 else:
                     QMessageBox.warning(self, "失败", "更新包路径为空")
         else:
