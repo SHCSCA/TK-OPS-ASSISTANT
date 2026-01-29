@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TikTok 运营助手 v2.0 Pro")
+        self.setWindowTitle(f"TikTok 运营助手 v{config.APP_VERSION}")
         # 设置窗口图标（优先使用打包内 icon.ico）
         try:
             from pathlib import Path

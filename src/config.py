@@ -12,7 +12,7 @@ from dotenv import load_dotenv, set_key
 # ===================================================
 
 # Version
-APP_VERSION = "2.2.0"
+# APP_VERSION is now dynamic (see below)
 
 # Telemetry
 SENTRY_DSN = os.getenv("SENTRY_DSN", "") # 空字符串表示禁用
@@ -108,6 +108,27 @@ SRC_DIR = Path(__file__).resolve().parent  # 源代码目录 src/
 
 # Load environment variables from .env file
 load_dotenv(BASE_DIR / ".env")
+
+# ===================================================
+# 版本号管理 (Dynamic Versioning)
+# ===================================================
+def _get_app_version() -> str:
+    """获取应用版本号。
+    优先读取运行目录下的 APP_VERSION.txt (由更新程序生成)，
+    如果不存在，则使用默认的硬编码版本。
+    """
+    try:
+        ver_file = BASE_DIR / "APP_VERSION.txt"
+        if ver_file.exists():
+            v = ver_file.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return "2.2.3" # Default Fallback
+
+APP_VERSION = _get_app_version()
+
 
 # 输出目录 (Excel 报告和处理后的视频)
 OUTPUT_DIR = _ensure_dir(DATA_DIR / "Output")
