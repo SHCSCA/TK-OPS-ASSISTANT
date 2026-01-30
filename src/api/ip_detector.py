@@ -1,17 +1,17 @@
 """
 IP 检测与环境验证
 """
-import requests
 from typing import Tuple, Dict, Any
+import re
 import config
 from utils.logger import logger
-
+from utils.network import request_with_retry
 
 def _fetch_ipinfo() -> Dict[str, Any]:
     """获取 IP 基础信息（ip-api + ipinfo），并做容错合并。"""
     result: Dict[str, Any] = {}
     try:
-        response = requests.get(config.IP_API_URL, timeout=config.IP_API_TIMEOUT)
+        response = request_with_retry("GET", config.IP_API_URL, timeout=getattr(config, "IP_API_TIMEOUT", 10))
         response.raise_for_status()
         result.update(response.json() or {})
     except Exception:
@@ -21,13 +21,12 @@ def _fetch_ipinfo() -> Dict[str, Any]:
         params = {}
         if getattr(config, "IPINFO_TOKEN", ""):
             params["token"] = config.IPINFO_TOKEN
-        resp = requests.get(config.IPINFO_URL, params=params, timeout=config.IP_API_TIMEOUT)
+        resp = request_with_retry("GET", config.IPINFO_URL, params=params, timeout=getattr(config, "IP_API_TIMEOUT", 10))
         resp.raise_for_status()
         result.update(resp.json() or {})
     except Exception:
         pass
     return result
-
 
 def _fetch_scamalytics_score(ip_address: str) -> int | None:
     """从 Scamalytics 页面提取 Fraud Score（容错，失败返回 None）。"""
@@ -35,12 +34,11 @@ def _fetch_scamalytics_score(ip_address: str) -> int | None:
         return None
     try:
         url = f"https://scamalytics.com/ip/{ip_address}"
-        resp = requests.get(url, timeout=config.IP_API_TIMEOUT)
+        resp = request_with_retry("GET", url, timeout=getattr(config, "IP_API_TIMEOUT", 10))
         if resp.status_code != 200:
             return None
         text = resp.text
         # 简单正则提取分数
-        import re
         m = re.search(r"Fraud\s*Score\s*[:>\s]*([0-9]{1,3})", text, re.IGNORECASE)
         if m:
             return int(m.group(1))
