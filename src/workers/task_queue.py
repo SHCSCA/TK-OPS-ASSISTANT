@@ -137,24 +137,8 @@ class TaskManager(QObject):
     def get_task(self, task_id) -> Optional[TaskPayload]:
         return self.tasks.get(task_id)
 
-
-    
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())[:8]
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转为字典（用于 JSON 导出）"""
-        d = asdict(self)
-        d['status'] = self.status.value
-        return d
-    
-    def elapsed_seconds(self) -> float:
-        """返回已耗时（秒）"""
-        if self.status == TaskStatus.RUNNING:
-            return time.time() - self.started_at
-        return self.elapsed
-
+# 兼容旧代码类型别名
+Task = TaskPayload
 
 class TaskQueue:
     """任务队列管理器（支持并发执行、取消、重试）"""

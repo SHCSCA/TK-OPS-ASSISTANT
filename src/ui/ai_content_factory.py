@@ -110,13 +110,71 @@ class AIContentFactoryPanel(QWidget):
             self._init_smart_narrate_ui(self.tab_smart_narrate)
             self._main_tab_index["narrate"] = self.main_tabs.addTab(self.tab_smart_narrate, "🎙️ 智能解说二创")
 
-        # ----------- [Tab B] 半人马拼接 -----------
-        if self._enable_cyborg and (not self._photo_only):
-            self.tab_cyborg = QWidget()
-            self._init_cyborg_ui(self.tab_cyborg)
-            self._main_tab_index["cyborg"] = self.main_tabs.addTab(self.tab_cyborg, "🐴 半人马拼接")
+        # ----------- [Tab C] Task Monitoring (New P0) -----------
+        self.tab_monitor = QWidget()
+        self._init_task_monitor_ui(self.tab_monitor)
+        # 将其添加为新的 Tab
+        self.main_tabs.addTab(self.tab_monitor, "📊 任务队列")
 
-        # 仅图转视频时隐藏顶部大 Tab 导航
+    def _init_task_monitor_ui(self, parent):
+        """Task Monitor UI with Card + Skeleton"""
+        from ui.components.task_card import TaskCard
+        from workers.task_queue import TaskManager
+
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        # Header
+        header = QHBoxLayout()
+        title = QLabel("正在进行的任务")
+        title.setObjectName("h2")
+        header.addWidget(title)
+        header.addStretch()
+        
+        clear_btn = QPushButton("清除已完成")
+        clear_btn.clicked.connect(self._clear_completed_tasks)
+        header.addWidget(clear_btn)
+        layout.addLayout(header)
+
+        # Scrollable Task List
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.task_list_container = QWidget()
+        self.task_list_layout = QVBoxLayout(self.task_list_container)
+        self.task_list_layout.setAlignment(Qt.AlignTop)
+        self.task_list_layout.setSpacing(8)
+        
+        scroll.setWidget(self.task_list_container)
+        layout.addWidget(scroll)
+
+        # Connect signals
+        try:
+            tm = TaskManager.instance()
+            tm.task_updated.connect(self._on_task_updated)
+        except Exception:
+            pass
+            
+        self._task_cards = {} # id -> TaskCard widget
+
+    def _add_task_card(self, task_id: str, title: str):
+        from ui.components.task_card import TaskCard
+        card = TaskCard(task_id, title)
+        self.task_list_layout.insertWidget(0, card) # Add to top
+        self._task_cards[task_id] = card
+        return card
+
+    def _on_task_updated(self, task_id, status_str):
+        if card := self._task_cards.get(task_id):
+            # Map status strings if needed to match TaskCard expectation
+            card.update_status(status_str, 0 if status_str=='pending' else 50 if status_str=='running' else 100)
+
+    def _clear_completed_tasks(self):
+        # Remove finished cards
+        pass
+
         if self._photo_only:
             try:
                 self.main_tabs.tabBar().hide()
