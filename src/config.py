@@ -291,44 +291,95 @@ def _export_to_module():
 
 _export_to_module()
 
-# 3. 提供更新方法 (供 UI 设置保存使用)
-def set_config(key: str, value, persist: bool = True, hot_reload: bool = True) -> None:
-    """
-    更新配置并持久化到 .env
-    """
-    global settings
+
+# 3. 提供更新方法 (供 UI 设置保存使用) - 引入 Debounce (Task 6)
+import threading
+import time
+
+_config_save_lock = threading.Lock()
+_pending_config_updates: Dict[str, Any] = {}
+_config_debounce_timer: Optional[threading.Timer] = None
+
+def _flush_config_updates():
+    """执行实际的配置保存 (Worker)"""
+    global _pending_config_updates, _config_debounce_timer
     
-    # 1. 更新 .env 文件
-    if persist:
-        env_path = BASE_DIR / ".env"
-        from dotenv import set_key
-        # Pydantic 字段名作为 key
-        val_str = str(value)
+    with _config_save_lock:
+         to_update = _pending_config_updates.copy()
+         _pending_config_updates.clear()
+         _config_debounce_timer = None
+    
+    if not to_update:
+        return
+
+    # 批量写入 .env 以减少 IO
+    env_path = BASE_DIR / ".env"
+    from dotenv import dotenv_values, set_key 
+    
+    # 1. 尝试一次性读取现有
+    # 由于 set_key 每次只写一行，多次调用依然会有 IO 开销
+    # 优化：如果 key 很多，可以重写整个文件，但为了安全起见暂时维持 loop set_key
+    # 仅在非关键路径使用 debounce
+    
+    for k, v in to_update.items():
         try:
              # 如果文件不存在先创建
             if not env_path.exists():
                 env_path.write_text("", encoding="utf-8")
-            set_key(env_path, key, val_str)
+            set_key(env_path, k, str(v))
         except Exception:
             pass
 
-    # 2. 如果需要热重载，重新实例化 settings
-    if hot_reload:
-        # 为了让内存生效，我们需要重新从环境/文件加载
-        # 但 os.environ 需要手动更新，因为 pydantic 优先读 environ
-        os.environ[key] = str(value)
-        try:
-            # 重新加载 .env 到 environ (dotenv 的 reload)
-            from dotenv import load_dotenv
-            load_dotenv(BASE_DIR / ".env", override=True)
-            
-            # 重新构建 Pydantic 模型
-            settings = AppSettings()
-            
-            # 重新导出到模块级别，让 import config 的地方生效
-            _export_to_module()
-        except Exception as e:
-            print(f"Reload config failed: {e}")
+    # 处理 hot_reload (仅需 reload 一次)
+    # 注意：这里我们假设 set_config 的调用者通常期望 hot_reload=True
+    # 我们将在 flush 结束时统一 reload
+    try:
+        # 更新 os.environ
+        for k, v in to_update.items():
+             os.environ[k] = str(v)
+             
+        from dotenv import load_dotenv
+        load_dotenv(BASE_DIR / ".env", override=True)
+        
+        global settings
+        settings = AppSettings()
+        _export_to_module()
+    except Exception as e:
+        print(f"Reload config failed: {e}")
+
+def set_config(key: str, value, persist: bool = True, hot_reload: bool = True) -> None:
+    """
+    更新配置并持久化到 .env
+    (Task 6: 实现防抖机制，避免 UI 连续调整时频繁 I/O)
+    """
+    global settings, _config_debounce_timer
+    
+    # 立即更新内存中的 module level 变量，保证 UI 响应性 (Optimistic UI)
+    current_module = sys.modules[__name__]
+    setattr(current_module, key, value)
+    
+    # 同时更新 Pydantic 实例的一份拷贝(如果可能)，防止不一致
+    # 但由于 settings 是不可变的(默认)，或者我们不想太复杂，暂时跳过 deeply sync settings object
+    
+    if not persist:
+        # 仅内存更新
+        if hot_reload:
+             # 简单更新 environ 模拟
+             os.environ[key] = str(value)
+        return
+
+    # 防抖处理
+    with _config_save_lock:
+        _pending_config_updates[key] = value
+        
+        # 取消上一次的 timer
+        if _config_debounce_timer:
+            _config_debounce_timer.cancel()
+        
+        # 启动新 timer (0.5s)
+        _config_debounce_timer = threading.Timer(0.5, _flush_config_updates)
+        _config_debounce_timer.start()
+
 
 # 4. 提供重新加载方法
 def reload_config():
