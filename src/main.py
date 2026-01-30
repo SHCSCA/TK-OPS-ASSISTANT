@@ -127,10 +127,7 @@ def main():
 
     try:
         logger.info(
-            "依赖版本：PyQt5=%s, yt_dlp=%s, openpyxl=%s",
-            _safe_ver("PyQt5"),
-            _safe_ver("yt_dlp"),
-            _safe_ver("openpyxl"),
+            f"依赖版本：PyQt5={_safe_ver('PyQt5')}, yt_dlp={_safe_ver('yt_dlp')}, openpyxl={_safe_ver('openpyxl')}"
         )
     except Exception:
         pass

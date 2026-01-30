@@ -113,11 +113,11 @@ class DiagnosticsWorker(BaseWorker):
         package_dir.mkdir(parents=True, exist_ok=True)
         
         # 诊断结果
-        import time
+        from datetime import datetime
 
         diag_file = package_dir / f"diag_{int(time.time())}.json"
         diag_data = {
-            'timestamp': __import__('time').strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'items': [it.to_dict() for it in items],
             'startup_info': config.get_startup_info(),
         }
