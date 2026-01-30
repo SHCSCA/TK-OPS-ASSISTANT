@@ -84,8 +84,22 @@ def main():
         if os.path.exists("build"): shutil.rmtree("build")
         if os.path.exists("dist"): shutil.rmtree("dist")
         
-        # B. 检查 PyInstaller
-        build_status = "Check dependencies"
+        # B. 检查 PyInstaller & Binaries
+        build_status = "Check environment"
+        
+        # Check FFmpeg binaries for bundling
+        bin_dir = Path("bin")
+        has_ffmpeg = (bin_dir / "ffmpeg.exe").exists()
+        has_ffprobe = (bin_dir / "ffprobe.exe").exists()
+        
+        if not (has_ffmpeg and has_ffprobe):
+            print(f"{Colors.WARNING}[WARN] 'bin/ffmpeg.exe' or 'bin/ffprobe.exe' not found.{Colors.ENDC}")
+            print(f"{Colors.WARNING}       The generated EXE will allow operations but require FFmpeg in system PATH.{Colors.ENDC}")
+            print(f"{Colors.WARNING}       To bundle FFmpeg, create a 'bin' folder and place the executables there.{Colors.ENDC}")
+            time.sleep(2) # Give user a chance to read
+        else:
+             print(f"{Colors.GREEN}[INFO] Found FFmpeg binaries in 'bin/'. They will be bundled.{Colors.ENDC}")
+
         python_exe = sys.executable
         # 简单检查
         

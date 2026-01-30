@@ -21,6 +21,8 @@ import config
 from workers.base_worker import BaseWorker
 from tts import synthesize as tts_synthesize
 from utils.cloud_video import generate_video_from_image
+from video.processor import VideoProcessor
+from utils.ffmpeg import FFmpegUtils
 
 logger = logging.getLogger(__name__)
 
@@ -415,156 +417,150 @@ class PhotoVideoWorker(BaseWorker):
         return out
 
     def _synthesize_timeline_audio(self, timeline: list[dict], out_path: Path) -> tuple[str, str]:
-        try:
-            from moviepy import AudioFileClip, AudioClip, concatenate_audioclips, CompositeAudioClip
-        except Exception as e:
-            return "", f"MoviePy 依赖缺失：{e}"
-
+        processor = VideoProcessor()
         provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
         fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
 
-        clips = []
+        audio_segments = []
+        cleanup_files = []
         current_time = 0.0
 
-        def _silence(duration: float):
-            if duration <= 0:
-                return None
-            return AudioClip(lambda t: 0, duration=duration, fps=44100)
-
-        for i, seg in enumerate(timeline):
-            if not isinstance(seg, dict):
-                continue
-            try:
-                start = float(seg.get("start", 0))
-                end = float(seg.get("end", 0))
-            except Exception:
-                continue
-            text = (seg.get("text", "") or "").strip()
-            emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
-            if not text or end <= start:
-                continue
-
-            if start > current_time:
-                gap = start - current_time
-                s = _silence(gap)
-                if s:
-                    clips.append(s)
-                    current_time += gap
-
-            seg_out = out_path.parent / f"tts_seg_{i:03d}.mp3"
-            try:
-                tts_synthesize(text=text, out_path=seg_out, provider=provider, emotion=emotion)
-            except Exception as e:
-                if fallback:
-                    try:
-                        tts_synthesize(text=text, out_path=seg_out, provider=fallback, emotion=emotion)
-                    except Exception as e2:
-                        return "", f"TTS 分段失败：{e}；备用失败：{e2}"
-                else:
-                    return "", f"TTS 分段失败：{e}"
-
-            if not seg_out.exists():
-                return "", "分段配音文件未生成"
-
-            clip = AudioFileClip(str(seg_out))
-            slot = max(0.1, end - start)
-            dur = float(getattr(clip, "duration", 0.0) or 0.0)
-
-            if dur > slot:
-                factor = dur / slot
+        try:
+            for i, seg in enumerate(timeline):
+                if not isinstance(seg, dict):
+                    continue
                 try:
-                    clip = clip.with_speed_scaled(factor)
+                    start = float(seg.get("start", 0))
+                    end = float(seg.get("end", 0))
                 except Exception:
-                    pass
-            elif dur < slot:
-                pad = slot - dur
-                s = _silence(pad)
-                if s:
-                    clips.append(clip)
-                    clips.append(s)
-                    current_time = end
+                    continue
+                text = (seg.get("text", "") or "").strip()
+                emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
+                if not text or end <= start:
                     continue
 
-            clips.append(clip)
-            current_time = end
+                # Handle Gap
+                if start > current_time:
+                    gap = start - current_time
+                    if gap > 0.05:
+                        gap_file = out_path.parent / f"silence_gap_{i}_{int(time.time())}.mp3"
+                        if processor.generate_silence(gap, str(gap_file)):
+                            audio_segments.append(str(gap_file))
+                            cleanup_files.append(gap_file)
+                        current_time += gap
 
-        if not clips:
-            return "", "时间轴为空或无法生成配音"
+                # Generate TTS
+                seg_out = out_path.parent / f"tts_seg_{i:03d}.mp3"
+                try:
+                    tts_synthesize(text=text, out_path=seg_out, provider=provider, emotion=emotion)
+                    cleanup_files.append(seg_out)
+                except Exception as e:
+                    if fallback:
+                        try:
+                            tts_synthesize(text=text, out_path=seg_out, provider=fallback, emotion=emotion)
+                            cleanup_files.append(seg_out)
+                        except Exception as e2:
+                            return "", f"TTS failed: {e}; Fallback failed: {e2}"
+                    else:
+                        return "", f"TTS failed: {e}"
 
-        final_audio = concatenate_audioclips(clips)
+                if not seg_out.exists():
+                     return "", "TTS file not generated"
 
-        # BGM 混音（可选）
-        if self.bgm_path:
-            try:
-                bgm = AudioFileClip(self.bgm_path).with_volume_scaled(0.2)
-                bgm = bgm.with_duration(final_audio.duration)
-                final_audio = CompositeAudioClip([bgm, final_audio])
-            except Exception:
-                pass
+                # Adjust duration
+                dur = processor.get_audio_duration(str(seg_out))
+                slot = max(0.1, end - start)
+                
+                final_seg_path = seg_out
+                
+                if dur > slot + 0.1: # Allow small tolerance
+                    # Speed up
+                    factor = dur / slot
+                    # Cap speedup to avoid chipmunk effect if possible, but timeline constraints are strict
+                    adjusted_path = out_path.parent / f"tts_seg_{i:03d}_adj.mp3"
+                    if processor.adjust_audio_speed(str(seg_out), str(adjusted_path), factor):
+                         final_seg_path = adjusted_path
+                         cleanup_files.append(adjusted_path)
+                    else:
+                         return "", "Audio speed adjustment failed"
+                elif dur < slot - 0.1:
+                    # Pad with silence
+                    audio_segments.append(str(final_seg_path))
+                    
+                    pad = slot - dur
+                    pad_file = out_path.parent / f"silence_pad_{i}_{int(time.time())}.mp3"
+                    if processor.generate_silence(pad, str(pad_file)):
+                        audio_segments.append(str(pad_file))
+                        cleanup_files.append(pad_file)
+                    
+                    current_time = end
+                    continue # Skip default append
 
-        final_audio.write_audiofile(str(out_path), logger=None)
-        return str(out_path), ""
+                audio_segments.append(str(final_seg_path))
+                current_time = end
+
+            if not audio_segments:
+                return "", "Empty timeline"
+
+            # Merge all segments
+            # Generate temp concat output without BGM first
+            temp_voice = out_path.parent / f"voice_combined_{int(time.time())}.mp3"
+            if not processor.concat_audio_files(audio_segments, str(temp_voice)):
+                return "", "Audio concatenation failed"
+            
+            cleanup_files.append(temp_voice)
+
+            # Mix with BGM
+            if self.bgm_path and Path(self.bgm_path).exists():
+                # Use ffmpeg amix
+                # ffmpeg -i voice.mp3 -i bgm.mp3 -filter_complex "[1:a]volume=0.2[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2" out.mp3
+                ffmpeg = FFmpegUtils.get_ffmpeg()
+                if ffmpeg:
+                     cmd = [
+                         ffmpeg, "-y",
+                         "-i", str(temp_voice),
+                         "-i", self.bgm_path,
+                         "-filter_complex", "[1:a]volume=0.2[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0.5",
+                         "-c:a", "libmp3lame",
+                         "-q:a", "2",
+                         str(out_path)
+                     ]
+                     ok, err = FFmpegUtils.run_cmd(cmd)
+                     if not ok:
+                         # Fallback to just voice
+                         import shutil
+                         shutil.copy2(temp_voice, out_path)
+                else:
+                    import shutil
+                    shutil.copy2(temp_voice, out_path)
+            else:
+                import shutil
+                shutil.copy2(temp_voice, out_path)
+
+            return str(out_path), ""
+            
+        finally:
+            # Cleanup temp files
+            for f in cleanup_files:
+                try:
+                    if f.exists(): os.remove(f)
+                except:
+                    pass
 
     def _compose_photo_video(self, timeline: list[dict], audio_path: str, out_path: Path) -> str:
-        try:
-            from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip, ColorClip
-        except Exception as e:
-            self.emit_log(f"MoviePy 依赖缺失：{e}")
+        ffmpeg = FFmpegUtils.get_ffmpeg()
+        if not ffmpeg:
+            self.emit_log("FFmpeg not found")
             return ""
 
-        target_w, target_h = 1080, 1920
-
-        def _make_clip(img_path: str, duration: float):
-            clip = ImageClip(img_path).with_duration(duration)
-            try:
-                clip = clip.resized(height=target_h)
-                if clip.w < target_w:
-                    clip = clip.resized(width=target_w)
-            except Exception:
-                pass
-
-            base_w, base_h = clip.w, clip.h
-
-            def _ease(t: float) -> float:
-                if duration <= 0.1:
-                    return 0.0
-                x = max(0.0, min(1.0, t / duration))
-                return 0.5 - 0.5 * math.cos(math.pi * x)
-
-            zoom_max = 0.08
-
-            def _scale(t: float) -> float:
-                return 1.0 + zoom_max * _ease(t)
-
-            try:
-                clip = clip.resized(lambda t: _scale(t))
-            except Exception:
-                pass
-
-            def _pos(t: float):
-                s = _scale(t)
-                w = base_w * s
-                h = base_h * s
-                pan = _ease(t)
-                # 位置范围：[target - size, 0]
-                x = (target_w - w) * pan
-                y = (target_h - h) * (1.0 - pan)
-                return (x, y)
-
-            try:
-                clip = clip.with_position(_pos)
-            except Exception:
-                pass
-
-            # 叠到黑底上，确保尺寸一致
-            bg = ColorClip(size=(target_w, target_h), color=(0, 0, 0)).with_duration(duration)
-            return CompositeVideoClip([bg, clip], size=(target_w, target_h))
-
+        cleanup_files = []
+        
         try:
-            clips = []
             if not self.images:
-                self.emit_log("未提供图片，无法合成")
+                self.emit_log("No images provided")
                 return ""
+
+            # Determine durations
             if self.image_durations and len(self.image_durations) == len(self.images):
                 durations = [max(0.1, float(d)) for d in self.image_durations]
             else:
@@ -575,40 +571,149 @@ class PhotoVideoWorker(BaseWorker):
                 if not durations:
                     durations = [max(0.1, float(self.total_duration) / len(self.images))] * len(self.images)
 
-            audio_duration = None
-            if audio_path:
-                try:
-                    audio = AudioFileClip(audio_path)
-                    audio_duration = float(getattr(audio, "duration", 0.0) or 0.0)
-                except Exception:
-                    audio = None
-            else:
-                audio = None
-
-            if audio_duration and sum(durations) > 0:
+            # Adjust durations to match audio if exists
+            # (In FFmpeg workflow, we usually build video to match audio length or loop video)
+            # Here we follow original logic: scale video durations to match audio.
+            audio_duration = 0.0
+            if audio_path and Path(audio_path).exists():
+                audio_duration = FFmpegUtils.get_duration(audio_path)
+            
+            if audio_duration > 0 and sum(durations) > 0:
                 factor = audio_duration / sum(durations)
                 durations = [max(0.1, d * factor) for d in durations]
 
-            for i, dur in enumerate(durations):
-                img_path = self.images[i % len(self.images)]
-                clips.append(_make_clip(img_path, dur))
-
-            video = concatenate_videoclips(clips, method="compose")
-            if audio is not None:
-                try:
-                    video = video.with_audio(audio)
-                except Exception:
-                    pass
+            video_segments = []
+            
             fps = 24
             try:
                 fps = int(getattr(config, "PHOTO_VIDEO_FPS", 24) or 24)
             except Exception:
                 fps = 24
-            video.write_videofile(str(out_path), codec="libx264", audio_codec="aac", fps=fps, logger=None)
+
+            for i, dur in enumerate(durations):
+                img_path = self.images[i % len(self.images)]
+                temp_seg = out_path.parent / f"v_seg_{i}_{int(time.time())}.mp4"
+                
+                # Ken Burns Loop + Zoom
+                # zoompan: 
+                #   z='min(zoom+0.0015,1.5)' : Zoom in slowly
+                #   d=25*dur : Duration in frames (approx, assume 25fps for calc, but actual fps set in output)
+                #   s=1080x1920 : Output size
+                #   fps=fps : Output fps
+                # Note: zoompan requires input frames. Image is 1 frame.
+                # We loop image to needed duration.
+                
+                # Filter chain:
+                # 1. scale/crop to aspect ratio first to avoid distortion in zoompan? 
+                #    Actually zoompan resets SAR/DAR sometimes.
+                #    Best practice: Pad/Crop to 1080p, then zoompan? 
+                #    Or just zoompan directly on image.
+                # Let's try direct zoompan on input image loop.
+                
+                frames = int(dur * fps)
+                
+                # Randomize zoom direction (in or out)
+                # Zoom In: z='min(zoom+0.0015,1.5)'
+                # Zoom Out: z='if(eq(on,1),1.5,max(1.0,zoom-0.0015))' ... complex init.
+                # Keep simple: Always Zoom In for now.
+                
+                # s=1080x1920
+                
+                # Construct filter
+                # We need input loop. -loop 1 -t duration
+                
+                # zoompan logic:
+                # z='min(zoom+0.002,1.2)' -> 0.002 per frame. 25fps -> 0.05 per sec. 5 sec -> 0.25 zoom. 1.0 -> 1.25. (Nice slow zoom)
+                
+                zoom_speed = 0.0015
+                vf = (
+                    f"scale=1080*2:-1," # Scale up first for quality? Or just use raw.
+                    f"zoompan=z='min(zoom+{zoom_speed},1.5)':d={frames}:"
+                    f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps={fps}"
+                )
+                
+                # Ensure even numbers for encoders (yuv420p)
+                vf += ",setsar=1"
+                
+                cmd = [
+                    ffmpeg, "-y",
+                    "-loop", "1",
+                    "-t", str(dur),
+                    "-i", str(img_path),
+                    "-vf", vf,
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p",
+                    str(temp_seg)
+                ]
+                
+                ok, err = FFmpegUtils.run_cmd(cmd)
+                if ok:
+                    video_segments.append(str(temp_seg))
+                    cleanup_files.append(temp_seg)
+                else:
+                    self.emit_log(f"Segment {i} generation failed: {err}")
+                    pass # Skip? Or fail?
+
+            if not video_segments:
+                return ""
+
+            # Concat video segments
+            temp_video = out_path.parent / f"video_combined_{int(time.time())}.mp4"
+            
+            # Create list file
+            list_path = out_path.parent / f"concat_v_list_{int(time.time())}.txt"
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in video_segments:
+                    safe_path = Path(p).resolve().as_posix().replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+            cleanup_files.append(list_path)
+
+            cmd_concat = [
+                ffmpeg, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_path),
+                "-c", "copy",
+                str(temp_video)
+            ]
+            ok, err = FFmpegUtils.run_cmd(cmd_concat)
+            if not ok:
+                self.emit_log(f"Video concat failed: {err}")
+                return ""
+            cleanup_files.append(temp_video)
+
+            # Merge with audio
+            if audio_path and Path(audio_path).exists():
+                cmd_merge = [
+                    ffmpeg, "-y",
+                    "-i", str(temp_video),
+                    "-i", str(audio_path),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-shortest", # Stop when shortest stream ends (usually video or audio)
+                    str(out_path)
+                ]
+                ok, err = FFmpegUtils.run_cmd(cmd_merge)
+                if not ok:
+                     self.emit_log(f"Merge audio failed: {err}")
+                     return ""
+            else:
+                import shutil
+                shutil.copy2(temp_video, out_path)
+
             return str(out_path)
         except Exception as e:
-            self.emit_log(f"图转视频失败：{e}")
+            self.emit_log(f"Photo video composition exception: {e}")
             return ""
+        finally:
+            for f in cleanup_files:
+                try:
+                    if os.path.exists(f): os.remove(f)
+                except:
+                    pass
 
     def _burn_subtitles_ffmpeg(self, *, input_video_path: str, srt_path: str) -> str:
         """使用 ffmpeg 将 srt 字幕烧录到视频中。"""

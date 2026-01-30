@@ -89,8 +89,28 @@ tk-ops-assistant/
 
 ## 打包（PyInstaller）
 
+项目支持生成“零依赖”的 standalone EXE 文件。
+
+### 1. 准备 FFmpeg 资源（可选，推荐）
+
+为了确保 EXE 在任何电脑上都能处理视频，建议打包前手动放入 ffmpeg：
+
+1.  下载 `ffmpeg.exe` 和 `ffprobe.exe` (Windows x64)
+2.  在项目根目录新建文件夹 `bin`
+3.  将两个 `.exe` 放入 `bin/` 文件夹
+
+> 如果不放入，打包出的 EXE 将通过系统 `PATH` 调用 ffmpeg。用户电脑必须安装 ffmpeg 才能使用视频功能。
+
+### 2. 执行打包
+
 - 双击运行 `build.bat`
-- 产物输出到 `dist/`（以脚本实际输出为准）
+- 产物输出到 `dist/tk-ops-assistant/` 或 `dist/tk-ops-assistant.exe`
+
+## 技术说明 (V3.1)
+
+- **视频与音频处理**：已完全移除 `MoviePy` 依赖，改用原生 `FFmpeg` 调用（性能提升，解决内存溢出问题）。
+- **初始化向导**：支持首次启动时引导配置 API Key。
+- **配置系统**：基于 Pydantic 的强类型配置管理。
 
 ## 常见问题
 

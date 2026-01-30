@@ -25,6 +25,7 @@ from PyQt5.QtCore import pyqtSignal
 import config
 from workers.base_worker import BaseWorker
 from api.echotik_api import EchoTikApiClient
+from utils.ffmpeg import FFmpegUtils
 
 
 @dataclass
@@ -78,52 +79,15 @@ class DiagnosticsWorker(BaseWorker):
         return DiagnosticItem(name, False, f"未配置。{hint}", hint)
 
     def _check_ffmpeg(self) -> DiagnosticItem:
-        ffmpeg_path = shutil.which("ffmpeg")
-        source = "PATH"
-
-        # 兼容：部分环境不在 PATH 放 ffmpeg，但 moviepy/imageio-ffmpeg 仍可能提供可用路径
-        if not ffmpeg_path:
-            try:
-                import imageio_ffmpeg  # type: ignore
-
-                ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-                source = "imageio-ffmpeg"
-            except Exception:
-                ffmpeg_path = None
-
-        if not ffmpeg_path:
-            return DiagnosticItem(
-                "ffmpeg",
-                False,
-                "未找到 ffmpeg。moviepy 需要 ffmpeg 才能运行。",
-                "请下载 ffmpeg.exe 并将其放入程序根目录，或配置系统环境变量 PATH 指向 ffmpeg bin 目录。"
-            )
-
-        try:
-            proc = subprocess.run(
-                [ffmpeg_path, "-version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if proc.returncode == 0:
-                first_line = (proc.stdout or "").splitlines()[:1]
-                ver = first_line[0] if first_line else "ffmpeg 可用"
-                return DiagnosticItem("ffmpeg", True, f"{ver}（来源：{source}）")
-            err = (proc.stderr or proc.stdout or "").strip()
-            return DiagnosticItem(
-                "ffmpeg", 
-                False, 
-                f"ffmpeg 执行失败：{err[:200]}", 
-                "ffmpeg 可执行文件可能已损坏，请重新下载并替换。"
-            )
-        except Exception as e:
-            return DiagnosticItem(
-                "ffmpeg", 
-                False, 
-                f"ffmpeg 检测异常：{e}",
-                "请检查 ffmpeg 是否被安全软件拦截。"
-            )
+        if FFmpegUtils.ensure_binaries():
+            return DiagnosticItem("ffmpeg", True, f"可用: {FFmpegUtils.get_ffmpeg()}")
+        
+        return DiagnosticItem(
+            "ffmpeg",
+            False,
+            "未找到 ffmpeg。",
+            "请下载 ffmpeg.exe 并将其放入 bin 目录，或配置环境变量。"
+        )
 
     def _check_dependencies_versions(self) -> DiagnosticItem:
         """检查关键依赖版本"""
@@ -162,19 +126,6 @@ class DiagnosticsWorker(BaseWorker):
             json.dump(diag_data, f, ensure_ascii=False, indent=2)
         
         self.emit_log(f"诊断包已保存到：{diag_file}")
-
-    def _check_moviepy(self) -> DiagnosticItem:
-        try:
-            import moviepy  # noqa: F401
-
-            return DiagnosticItem("moviepy", True, "moviepy 可导入")
-        except Exception as e:
-            return DiagnosticItem(
-                "moviepy", 
-                False, 
-                f"moviepy 不可用：{e}",
-                "如果是源码运行请 pip install -r requirements.txt。如果是 EXE 请联系开发者检查打包。"
-            )
 
     def _check_echotik_connectivity(self) -> DiagnosticItem:
         missing = config.validate_required_config()
@@ -395,7 +346,7 @@ class DiagnosticsWorker(BaseWorker):
         self.emit_progress(60)
 
         # 3) 依赖可用性
-        items.append(self._check_moviepy())
+        # items.append(self._check_moviepy())  # Removed
         items.append(self._check_edge_tts_dependency())
         items.append(self._check_volc_tts_config())
         self.emit_progress(75)

@@ -18,11 +18,9 @@ if src_path not in sys.path:
 datas = []
 binaries = []
 # [关键修改] 移除了 'PyQt5.sip' (由 runtime-hook 处理)，保留其他业务库
-hiddenimports = ['pandas', 'openpyxl', 'PIL', 'moviepy', 'yt_dlp', 'openai', 'imageio_ffmpeg']
+hiddenimports = ['pandas', 'openpyxl', 'PIL', 'yt_dlp', 'openai']
 
-# imageio_ffmpeg 必须收集，因为它包含 ffmpeg 二进制文件
-tmp_ret = collect_all('imageio_ffmpeg')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# imageio_ffmpeg 移除 (改用 bin 目录或 PATH 自带 ffmpeg)
 
 # qt_material 需要额外资源（主题/样式）
 datas += collect_data_files('qt_material')
@@ -44,12 +42,15 @@ hiddenimports += collect_submodules('video')
 hiddenimports += collect_submodules('ai')
 
 # [修复] 解决依赖库元数据缺失问题
-datas += copy_metadata('imageio')
-datas += copy_metadata('moviepy')
 datas += copy_metadata('requests')
 # 兼容部分 pandas 版本的依赖
 datas += copy_metadata('numpy') 
 datas += copy_metadata('pandas')
+
+# 包含 bundled bin 目录 (FFmpeg)
+bin_path = project_root / 'bin'
+if bin_path.exists():
+    datas.append((str(bin_path), 'bin'))
 
 # 将 .env 一并打进去
 env_path = project_root / '.env'

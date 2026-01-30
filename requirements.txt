@@ -17,8 +17,8 @@ openai
 pandas==2.1.0
 openpyxl==3.1.2
 
-# Video Processing (Upgrade to 2.0+ for better performance)
-moviepy>=2.0.0
+# Video Processing
+# moviepy>=2.0.0 (Removed in v3.1, using FFmpeg directly)
 
 # Image Processing
 Pillow==10.0.0
@@ -48,3 +48,7 @@ sentry-sdk
 packaging
 
 numpy==1.26.4
+
+# Configuration
+pydantic>=2.0.0
+pydantic-settings>=2.0.0

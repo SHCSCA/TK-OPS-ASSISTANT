@@ -15,6 +15,10 @@ import config
 from tts import synthesize as tts_synthesize
 from tts.types import TtsError, TtsForbiddenError
 from video.processor import VideoProcessor
+from utils.ffmpeg import FFmpegUtils
+from ai.script_engine import ScriptEngine
+from video.audio_mixer import AudioMixer
+from tts.utils import build_emotion_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -166,169 +170,20 @@ class AIContentWorker(QThread):
             self.finished.emit("", f"处理失败: {str(e)}")
 
     def generate_script(self):
-        """调用 DeepSeek API 生成脚本"""
-        try:
-            import openai
-
-            self._last_script_error = ""
-
-            from utils.ai_routing import resolve_ai_profile
-
-            profile = resolve_ai_profile("factory", model_override=self.model, provider_override=self.provider)
-            api_key = (profile.get("api_key", "") or "").strip()
-            if not api_key:
-                logger.warning("AI_API_KEY 未配置")
-                return None
-            
-            # 配置 OpenAI 兼容客户端
-            client = openai.OpenAI(
-                api_key=api_key,
-                base_url=(profile.get("base_url", "") or "").strip() or "https://api.deepseek.com",
-            )
-
-            # 火山方舟（Ark）深度思考：仅当用户显式配置且 base_url 为 Ark 时透传。
-            base_url_now = ""
-            try:
-                base_url_now = (profile.get("base_url", "") or "").strip()
-            except Exception:
-                base_url_now = ""
-
-            ark_thinking_type = (getattr(config, "ARK_THINKING_TYPE", "") or "").strip()
-            ark_extra = None
-            if base_url_now and ark_thinking_type:
-                u = base_url_now.lower()
-                if ("volces.com" in u) or ("volcengine.com" in u) or ("ark." in u):
-                    ark_extra = {"thinking": {"type": ark_thinking_type}}
-            
-            system = (
-                "You are a TikTok script writer. Keep output concise and natural. "
-                "Follow role/style constraints if provided."
-            )
-            extra_role = (
-                (self.role_prompt or "").strip()
-                or (getattr(config, "AI_FACTORY_ROLE_PROMPT", "") or "").strip()
-                or (getattr(config, "AI_SYSTEM_PROMPT", "") or "").strip()
-            )
-            
-            is_free_mode = bool(self.role_prompt and self.role_prompt.strip())
-            
-            if extra_role:
-                system = system + "\n[ROLE_PROMPT]\n" + extra_role
-
-            if is_free_mode:
-                # 自由模式：完全听从 Role Prompt，仅保留最基础要求
-                prompt = f"""
-Context / Product: {self.product_desc}
-
-Requirement: Write a short video script based on the ROLE_PROMPT above.
-Output ONLY the script text, no markdown.
-""".strip()
-            else:
-                # 默认模式：保持旧有结构
-                prompt = f"""
-Create a 30-second product pitch script for:
-
-Product: {self.product_desc}
-
-Requirements:
-- Start with a Hook (3 seconds)
-- Present Pain Points (10 seconds)
-- Show Solution (15 seconds)
-- End with Call to Action (2 seconds)
-- Use casual, conversational American English
-- Keep it under 100 words
-
-Output ONLY the script text, no formatting.
-""".strip()
-
-            use_model = (profile.get("model", "") or "").strip() or "deepseek-chat"
-
-            # --- Model Capability Validation ---
-            _model_lower = use_model.lower()
-            if any(k in _model_lower for k in ("seedance", "t2v", "i2v", "wan2.1", "wan2-1")):
-                self.emit_log(f"⚠️ 错误：检测到视频生成模型 '{use_model}'")
-                self.emit_log("❌ 二创工厂的脚本生成环节需要文本模型，不能使用视频模型！")
-                return None
-
-            # Auto-correction for DeepSeek official API
-            if "deepseek.com" in (base_url_now or ""):
-                if use_model not in ("deepseek-chat", "deepseek-reasoner"):
-                    if "r1" in use_model.lower():
-                        use_model = "deepseek-reasoner"
-                    else:
-                        use_model = "deepseek-chat"
-
-            # Ark（火山方舟）官方示例优先使用 Responses API
-            if base_url_now and "volces.com" in base_url_now and hasattr(client, "responses"):
-                resp = client.responses.create(
-                    model=use_model,
-                    input=prompt,
-                    instructions=system,
-                )
-                text = ""
-                try:
-                    text = (getattr(resp, "output_text", "") or "").strip()
-                    # 尝试获取 usage (responses API 可能结构不同，需查阅文档，这里暂忽略或尝试通用字段)
-                except Exception:
-                    text = ""
-                if text:
-                    return text
-                # 兜底：即使解析不到文本，也不当作失败
-                return ""
-
-            # chat.completions：如为 Ark 且配置了 thinking，则尝试透传；不支持则自动降级。
-            try:
-                kwargs = {
-                    "model": use_model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": 4096, # Increased for reasoning models
-                    "temperature": 0.5,
-                }
-                if ark_extra:
-                    kwargs["extra_body"] = ark_extra
-                    
-                response = client.chat.completions.create(**kwargs)
-
-                # 检查截断
-                try:
-                    if response.choices[0].finish_reason == "length":
-                         self.emit_log("⚠️ 警告：输出因达到最大长度限制而被截断 (Max Tokens)")
-                except Exception:
-                    pass
-                
-                # Token 统计
-                try:
-                    if response and response.usage:
-                        u = response.usage
-                        token_msg = f"💰 Token 消耗: Prompt={u.prompt_tokens}, Completion={u.completion_tokens}, Total={u.total_tokens}"
-                        logger.info(token_msg)
-                        # 通过 progress 信号传回 UI 日志 (保持进度条不动)
-                        self.progress.emit(15, token_msg)
-                except Exception:
-                    pass
-                    
-                return (response.choices[0].message.content or "").strip()
-            except TypeError:
-                 # Legacy fallback
-                 try:
-                    # 降级尝试：不带 extra_body
-                    if "extra_body" in kwargs:
-                        del kwargs["extra_body"]
-                    response = client.chat.completions.create(**kwargs)
-                    return (response.choices[0].message.content or "").strip()
-                 except Exception:
-                     pass
-
-            except Exception as e:
-                logger.error(f"Generate script error: {e}")
-                return ""
-        except Exception as e:
-            logger.error(f"脚本生成调用失败: {e}", exc_info=True)
-            self._last_script_error = str(e)
+        """调用 ScriptEngine 生成脚本"""
+        engine = ScriptEngine(model_override=self.model, provider_override=self.provider)
+        
+        script = engine.generate_script(
+            product_desc=self.product_desc,
+            role_prompt=self.role_prompt,
+            ui_log_callback=lambda msg: self.progress.emit(15, msg)
+        )
+        
+        if not script:
+            self._last_script_error = engine.last_error
             return None
+            
+        return script
 
     def synthesize_voice(self, text):
         """合成语音（支持 volcengine/edge-tts + fallback）。"""
@@ -363,149 +218,13 @@ Output ONLY the script text, no formatting.
             return None, str(e)
 
     def _build_emotion_instruction(self, base_emotion: str) -> str:
-        """构建豆包 TTS 2.0 情绪指令文本。"""
-        preset = (getattr(config, "TTS_EMOTION_PRESET", "") or "").strip()
-        custom = (getattr(config, "TTS_EMOTION_CUSTOM", "") or "").strip()
-        intensity = (getattr(config, "TTS_EMOTION_INTENSITY", "中") or "中").strip()
-        scene_mode = (getattr(config, "TTS_SCENE_MODE", "") or "").strip().lower()
-
-        scene_templates = {
-            "commerce": "用强转化、强节奏、强调卖点的带货语气说",
-            "review": "用客观、冷静、对比分析的测评语气说",
-            "unboxing": "用真实、兴奋、细节描述的开箱语气说",
-            "story": "用剧情对白的语气说，带有情绪起伏",
-            "talk": "用清晰、稳定、讲解导向的口播语气说",
-        }
-
-        emotion = (base_emotion or "").strip().lower()
-        emotion_map = {
-            "happy": "开心",
-            "sad": "悲伤",
-            "angry": "生气",
-            "surprise": "惊讶",
-            "neutral": "平静",
-            "excited": "兴奋",
-            "calm": "沉稳",
-            "serious": "严肃",
-            "curious": "好奇",
-            "persuasive": "劝导",
-            "suspense": "悬念",
-            "warm": "温柔",
-            "firm": "坚定",
-            "energetic": "有活力",
-        }
-
-        parts = []
-        scene_hint = scene_templates.get(scene_mode, "")
-        if scene_hint:
-            parts.append(scene_hint)
-        if preset:
-            parts.append(preset)
-        if custom:
-            parts.append(custom)
-
-        if emotion and emotion != "neutral":
-            emotion_cn = emotion_map.get(emotion, emotion)
-            parts.append(f"情绪偏{emotion_cn}，强度{intensity}")
-        elif parts:
-            parts.append(f"情绪强度{intensity}")
-        else:
-            return ""
-
-        return "，".join([p for p in parts if p])
+        """Wrapper for shared utility."""
+        return build_emotion_instruction(base_emotion)
 
     def synthesize_timeline_voice(self, timeline: list[dict]) -> tuple[str, str]:
-        """根据时间轴逐段合成语音，并做弹性对齐 (FFmpeg版)。"""
-        audio_path = Path(self.output_dir) / self._name_voice_timeline
-        processor = VideoProcessor()
-
-        provider = (getattr(config, "TTS_PROVIDER", "edge-tts") or "edge-tts").strip()
-        fallback = (getattr(config, "TTS_FALLBACK_PROVIDER", "") or "").strip()
-        
-        clips_to_concat = [] 
-        current_time = 0.0
-        
-        # Helper for TTS generation
-        def _gen_tts(txt, emo, out):
-            try:
-                tts_synthesize(text=txt, out_path=out, provider=provider, emotion=emo)
-                return True
-            except Exception:
-                if fallback:
-                    try:
-                        tts_synthesize(text=txt, out_path=out, provider=fallback, emotion=emo)
-                        return True
-                    except: pass
-            return False
-
-        try:
-            for i, seg in enumerate(timeline):
-                if not isinstance(seg, dict): continue
-                try:
-                    start = float(seg.get("start", 0))
-                    end = float(seg.get("end", 0))
-                except Exception: continue
-                
-                text = (seg.get("text", "") or "").strip()
-                emotion = (seg.get("emotion", "neutral") or "neutral").strip().lower()
-                emotion_instruction = self._build_emotion_instruction(emotion)
-                if not text or end <= start: continue
-
-                # 1. Handle Gap (Silence)
-                if start > current_time:
-                    gap = start - current_time
-                    if gap > 0.05:
-                        silence_path = Path(self.output_dir) / f"silence_{i}_{int(gap*1000)}.mp3"
-                        if processor.generate_silence(gap, str(silence_path)):
-                            clips_to_concat.append(str(silence_path))
-                    current_time = start # Align to start
-
-                # 2. Generate TTS
-                seg_out = Path(self.output_dir) / f"tts_seg_{i:03d}.mp3"
-                if not _gen_tts(text, emotion_instruction, seg_out):
-                    return "", f"TTS generation failed for segment {i}"
-                
-                if not seg_out.exists():
-                     return "", f"TTS file missing for segment {i}"
-
-                # 3. Align Duration
-                dur = processor.get_audio_duration(str(seg_out))
-                slot = max(0.1, end - start)
-                
-                # Check speed factor
-                if dur > slot + 0.1: # Tolerance
-                    # Speed up
-                    factor = dur / slot
-                    speed_out = Path(self.output_dir) / f"tts_seg_{i:03d}_speed.mp3"
-                    if processor.adjust_audio_speed(str(seg_out), str(speed_out), factor):
-                        clips_to_concat.append(str(speed_out))
-                    else:
-                        # Fallback to original
-                        clips_to_concat.append(str(seg_out))
-                elif dur < slot - 0.1:
-                    # Pad
-                    clips_to_concat.append(str(seg_out))
-                    pad = slot - dur
-                    pad_path = Path(self.output_dir) / f"pad_{i}_{int(pad*1000)}.mp3"
-                    if processor.generate_silence(pad, str(pad_path)):
-                        clips_to_concat.append(str(pad_path))
-                else:
-                    clips_to_concat.append(str(seg_out))
-
-                current_time = end
-
-            if not clips_to_concat:
-                return "", "时间轴为空或无法生成配音"
-
-            # Concat all
-            if processor.concat_audio_files(clips_to_concat, str(audio_path)):
-                return str(audio_path), ""
-            else:
-                return "", "音频拼接失败"
-
-        except Exception as e:
-            logger.error(f"Timeline synthesis failed: {e}", exc_info=True)
-            return "", f"时间轴配音失败：{e}"
+        """根据时间轴逐段合成语音 (Delegated to AudioMixer)"""
+        mixer = AudioMixer(self.output_dir)
+        return mixer.synthesize_timeline(timeline)
     def _save_script(self, script: str) -> str:
         try:
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -701,15 +420,7 @@ Output ONLY the script text, no formatting.
             video_inp = str(Path(self.video_path).resolve())
             audio_inp = str(Path(audio_path).resolve())
 
-            import shutil
-
-            ffmpeg_path = shutil.which("ffmpeg")
-            if not ffmpeg_path:
-                try:
-                    import imageio_ffmpeg  # type: ignore
-                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-                except Exception:
-                    ffmpeg_path = None
+            ffmpeg_path = FFmpegUtils.get_ffmpeg()
             if not ffmpeg_path:
                 logger.error("未找到 ffmpeg，无法执行混流")
                 return None
@@ -721,7 +432,7 @@ Output ONLY the script text, no formatting.
             ]
 
             # 原视频无音轨时补一个静音轨，避免 filter_complex 报错
-            has_audio = self._has_audio_stream(video_inp)
+            has_audio = FFmpegUtils.has_audio(video_inp)
             if not has_audio:
                 cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
 
@@ -763,14 +474,9 @@ Output ONLY the script text, no formatting.
 
             logger.info(f"Executing FFmpeg: {' '.join(cmd)}")
 
-            startupinfo = None
-            if os.name == "nt":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            proc = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            if proc.returncode != 0:
-                logger.error(f"FFmpeg Error: {proc.stderr}")
+            ok, err = FFmpegUtils.run_cmd(cmd)
+            if not ok:
+                logger.error(f"FFmpeg Error: {err}")
                 return None
 
             return output_path
@@ -780,27 +486,7 @@ Output ONLY the script text, no formatting.
 
     def _has_audio_stream(self, video_path: str) -> bool:
         """检测视频是否包含音轨。"""
-        try:
-            import shutil
-            ffprobe = shutil.which("ffprobe")
-            if not ffprobe:
-                return True
-            cmd = [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=codec_type",
-                "-of",
-                "default=nw=1:nk=1",
-                str(Path(video_path).resolve()),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            return (proc.stdout or "").strip() == "audio"
-        except Exception:
-            return True
+        return FFmpegUtils.has_audio(video_path)
 
     def _save_subtitles(self, script_text: str, audio_path: str) -> str:
         """生成并落盘 SRT 字幕。
@@ -1178,15 +864,9 @@ Output ONLY the script text, no formatting.
 
     def _get_video_height(self, video_path: str) -> int:
         """尽量获取视频高度，用于字幕字号/边距自适应。"""
-        # 1) 优先 ffprobe（最可靠，避免 moviepy/解码失败回退导致字号巨大）
+        # 1) 优先 ffprobe
         try:
-            ffprobe = shutil.which("ffprobe")
-            if not ffprobe:
-                ffmpeg = shutil.which("ffmpeg")
-                if ffmpeg:
-                    cand = str(Path(ffmpeg).resolve().parent / "ffprobe.exe")
-                    if Path(cand).exists():
-                        ffprobe = cand
+            ffprobe = FFmpegUtils.get_ffprobe()
             if ffprobe:
                 # 取 width/height + rotate，得到“显示高度”（手机竖屏常见会带 rotate 元数据）
                 cmd = [
@@ -1201,9 +881,9 @@ Output ONLY the script text, no formatting.
                     "default=nw=1:nk=1",
                     str(Path(video_path).resolve()),
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                if proc.returncode == 0:
-                    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+                ok, out = FFmpegUtils.run_cmd(cmd)
+                if ok:
+                    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
                     if len(lines) >= 2:
                         try:
                             w = int(float(lines[0]))

@@ -127,9 +127,8 @@ def main():
 
     try:
         logger.info(
-            "依赖版本：PyQt5=%s, moviepy=%s, yt_dlp=%s, openpyxl=%s",
+            "依赖版本：PyQt5=%s, yt_dlp=%s, openpyxl=%s",
             _safe_ver("PyQt5"),
-            _safe_ver("moviepy"),
             _safe_ver("yt_dlp"),
             _safe_ver("openpyxl"),
         )
@@ -163,7 +162,36 @@ def main():
     theme_mode = getattr(config, "THEME_MODE", "dark")
     apply_global_theme(app, theme_mode)
 
-    # 启动时配置缺失提示（中文）
+    # === [Step 2] 首次启动向导 (Setup Wizard) ===
+    # 触发条件：未配置 AI_API_KEY (视为新环境)
+    # 可以在此添加更多判断条件，例如检测 .env 是否存在
+    if not getattr(config, "AI_API_KEY", ""):
+        try:
+            from ui.setup_wizard import SetupWizard
+            from PyQt5.QtWidgets import QDialog
+            
+            logger.info("检测到未配置环境，启动向导...")
+            wizard = SetupWizard()
+            if wizard.exec_() == QDialog.Accepted:
+                # 向导完成，重新加载配置以应用更改
+                config.reload_config()
+                # 重新应用可能变化的主题
+                apply_global_theme(app, getattr(config, "THEME_MODE", "light"))
+            else:
+                # 用户取消向导
+                reply = QMessageBox.question(
+                    None, 
+                    "配置未完成", 
+                    "您取消了初始化向导。程序将以受限模式运行，部分功能可能不可用。\n\n是否继续启动？", 
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    sys.exit(0)
+        except Exception as e:
+            logger.error(f"启动向导失败: {e}")
+            traceback.print_exc()
+
+    # 启动时配置缺失提示（中文） - 此时如果向导刚跑完，应该就没有缺失了
     try:
         missing = config.validate_required_config()
         if missing:

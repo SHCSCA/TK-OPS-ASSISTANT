@@ -69,7 +69,6 @@ class VideoWorker(BaseWorker):
         except Exception:
             self.max_retries = 0
 
-        # 懒加载：避免启动阶段导入 moviepy/numpy 等重依赖
         self.processor = None
         self.processing_results = []
     

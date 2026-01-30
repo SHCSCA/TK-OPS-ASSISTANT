@@ -15,6 +15,7 @@ from typing import List
 
 from workers.base_worker import BaseWorker
 from api.visual_ai_assistant import VisualAIAssistant
+from utils.ffmpeg import FFmpegUtils
 import config
 
 logger = logging.getLogger(__name__)
@@ -75,42 +76,43 @@ class VisualAnalysisWorker(BaseWorker):
         frames_b64: List[str] = []
         out_dir = self._prepare_output_dir()
 
-        try:
-            from moviepy import VideoFileClip
-            from imageio.v2 import imwrite
-        except Exception as e:
-            raise RuntimeError(f"缺少视频处理依赖：{e}")
+        ffmpeg = FFmpegUtils.get_ffmpeg()
+        if not ffmpeg:
+            logger.error("FFmpeg not found")
+            return []
 
-        clip = None
         try:
-            clip = VideoFileClip(self.video_path)
-            duration = float(getattr(clip, "duration", 0.0) or 0.0)
-            if duration <= 0:
-                return []
+            # fps=1/interval_sec
+            fps = 1.0 / self.interval_sec
+            output_pattern = str(out_dir / "frame_%03d.jpg")
+            
+            cmd = [
+                ffmpeg, "-y",
+                "-i", self.video_path,
+                "-vf", f"fps={fps}",
+                "-q:v", "2",
+                output_pattern
+            ]
+            
+            ok, err = FFmpegUtils.run_cmd(cmd)
+            if not ok:
+                 logger.error(f"Frame extraction failed: {err}")
+                 return []
 
-            t = 0.0
-            idx = 0
-            while t < duration:
+            for img_file in sorted(out_dir.glob("frame_*.jpg")):
                 if self.should_stop():
-                    return []
-                frame = clip.get_frame(t)
-                frame_path = out_dir / f"frame_{idx:03d}.jpg"
-                imwrite(frame_path, frame)
+                    break
                 try:
-                    b64 = base64.b64encode(frame_path.read_bytes()).decode("utf-8")
+                    b64 = base64.b64encode(img_file.read_bytes()).decode("utf-8")
                     frames_b64.append(b64)
                 except Exception:
                     pass
-                idx += 1
-                t += self.interval_sec
-        finally:
-            try:
-                if clip:
-                    clip.close()
-            except Exception:
-                pass
+            
+            return frames_b64
 
-        return frames_b64
+        except Exception as e:
+            logger.error(f"抽帧异常: {e}")
+            return []
 
     def _prepare_output_dir(self) -> Path:
         base_dir = Path(getattr(config, "OUTPUT_DIR", Path("Output"))) / "Visual_Lab"
