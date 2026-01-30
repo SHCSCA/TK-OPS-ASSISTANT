@@ -1,52 +1,143 @@
-"""统一任务队列（当前：预留/未在主流程接入）
+"""统一任务队列管理器 (Core Upgrade)
 
-用途设想：
-- 为下载/素材处理/蓝海监测等任务提供统一队列模型
-- 支持并发执行、取消、重试、统计导出
+功能：
+- 管理异步任务 (Asynchronous Task Orchestration)
+- UI 线程分离 (Rendering vs Networking isolation)
+- 实时状态回调 (Progress & Status signalling)
 
-说明：
-- 目前主流程仍以“各面板独立 worker”为主；该模块暂未被引用。
-- 保留此模块是为了后续把多个任务统一编排到一个任务中心。
+技术实现：
+- 基于 QThreadPool 做各种耗时操作
+- 使用 QObject + Signals 进行主线程通信
 """
 from enum import Enum
 from dataclasses import dataclass, asdict, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import uuid
 import time
-from pathlib import Path
-import json
+import logging
+import traceback
 
+from PyQt5.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QMetaObject, Qt, Q_ARG
 
 class TaskStatus(Enum):
-    """任务状态"""
-    PENDING = "pending"      # 等待中
-    RUNNING = "running"      # 运行中
-    SUCCESS = "success"      # 成功
-    FAILED = "failed"        # 失败
-    CANCELLED = "cancelled"  # 已取消
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
-class Task:
-    """统一任务模型"""
+class TaskPayload:
+    """任务载荷 (Pure Data)"""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    task_type: str = ""       # video_process / blue_ocean / etc
+    name: str = "Untitled Task"
+    type: str = "generic" 
     status: TaskStatus = TaskStatus.PENDING
+    progress: int = 0
+    created_at: float = field(default_factory=time.time)
     
-    # 输入与参数
-    input_data: Dict[str, Any] = field(default_factory=dict)
-    params: Dict[str, Any] = field(default_factory=dict)
+    # 执行回调
+    target_func: Optional[Callable] = None
+    args: tuple = ()
+    kwargs: Dict = field(default_factory=dict)
     
-    # 执行信息
-    progress: int = 0          # 0-100
-    started_at: float = 0.0
-    ended_at: float = 0.0
-    elapsed: float = 0.0
+    # 结果
+    result: Any = None
+    error: str = ""
+
+class TaskSignals(QObject):
+    """任务信号槽"""
+    status_changed = pyqtSignal(str, object) # task_id, NEW_STATUS
+    progress_updated = pyqtSignal(str, int)  # task_id, progress
+    finished = pyqtSignal(str, object)       # task_id, result_data
+    error = pyqtSignal(str, str)             # task_id, error_msg
+
+class StartableTask(QRunnable):
+    """可执行任务包装器"""
+    def __init__(self, payload: TaskPayload, signals: TaskSignals):
+        super().__init__()
+        self.payload = payload
+        self.signals = signals
+        self.setAutoDelete(True)
+
+    def run(self):
+        try:
+            self._emit_status(TaskStatus.RUNNING)
+            if self.payload.target_func:
+                # 执行具体业务逻辑
+                res = self.payload.target_func(*self.payload.args, **self.payload.kwargs)
+                self.payload.result = res
+                self._emit_finished(res)
+            else:
+                # 空任务模拟
+                time.sleep(1)
+                self._emit_finished(None)
+        except Exception as e:
+            err_msg = str(e)
+            traceback.print_exc()
+            self.payload.error = err_msg
+            self.signals.error.emit(self.payload.id, err_msg)
+            self._emit_status(TaskStatus.FAILED)
+
+    def _emit_status(self, status: TaskStatus):
+        self.payload.status = status
+        # 注意：QRunnable 在子线程，emit 默认是线程安全的 queued connection
+        self.signals.status_changed.emit(self.payload.id, status)
+
+    def _emit_finished(self, result):
+        self.payload.status = TaskStatus.SUCCESS
+        self.signals.finished.emit(self.payload.id, result)
+        self.signals.status_changed.emit(self.payload.id, TaskStatus.SUCCESS)
+
+class TaskManager(QObject):
+    """全局任务管理器 (Singleton)"""
+    _instance = None
     
-    # 输出与错误
-    output_data: Dict[str, Any] = field(default_factory=dict)
-    error_msg: str = ""
-    retries_left: int = 0
+    # 对外统一信号
+    task_updated = pyqtSignal(str, str) # id, status_str
+    
+    def __init__(self):
+        super().__init__()
+        self.pool = QThreadPool.globalInstance()
+        # 限制并发数，避免卡死
+        self.pool.setMaxThreadCount(4)
+        self.top_signals = TaskSignals()
+        
+        # 串联内部信号
+        self.top_signals.status_changed.connect(self._on_status_changed)
+        self.tasks: Dict[str, TaskPayload] = {}
+
+    @classmethod
+    def instance(cls):
+        if not cls._instance:
+            cls._instance = TaskManager()
+        return cls._instance
+
+    def submit(self, func, name="Task", *args, **kwargs) -> str:
+        """提交一个新任务"""
+        payload = TaskPayload(
+            name=name,
+            target_func=func,
+            args=args,
+            kwargs=kwargs
+        )
+        self.tasks[payload.id] = payload
+        
+        runner = StartableTask(payload, self.top_signals)
+        self.pool.start(runner)
+        
+        # 立即返回 ID
+        return payload.id
+
+    def _on_status_changed(self, task_id, status):
+        # 转发信号给 UI
+        self.task_updated.emit(task_id, status.value)
+
+    def get_task(self, task_id) -> Optional[TaskPayload]:
+        return self.tasks.get(task_id)
+
+
     
     def __post_init__(self):
         if not self.id:
